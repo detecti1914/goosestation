@@ -2277,9 +2277,12 @@ target_compile_definitions(goosestation_libretro PRIVATE "__LIBRETRO__=1")
 set_target_properties(goosestation_libretro PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Hide all symbols except retro_* to avoid collisions with libvulkan etc.
-target_link_options(goosestation_libretro PRIVATE
-  "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/link.T"
-)
+# PE/COFF doesn't use version scripts; on Windows RETRO_API uses dllexport.
+if(NOT WIN32)
+  target_link_options(goosestation_libretro PRIVATE
+    "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/link.T"
+  )
+endif()
 
 # No resources needed — libretro cores are self-contained .so files.
 # Game database, shaders, fonts, etc. are all handled by RetroArch.
