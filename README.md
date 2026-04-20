@@ -1,7 +1,7 @@
 # GooseStation Builder
 
 Reproducible builder for the **GooseStation** libretro core. Fetches a pinned
-upstream DuckStation tarball, applies the bundled `goosify.sh`, then builds the libretro core for the selected target.
+upstream DuckStation tarball, runs `goosify.sh`, then builds the libretro core for the selected target.
 
 Run `make help` for the full target list and the pinned commits this build
 would use.

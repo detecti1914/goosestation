@@ -185,7 +185,18 @@ if(ENABLE_VULKAN)
   if(NOT ANDROID)
     find_package(Shaderc REQUIRED)
   endif()
-  find_package(spirv_cross_c_shared REQUIRED)
+  # Android builds spirv-cross statically (linked into the core); desktop uses
+  # the shared lib (loaded via dlopen at runtime). Try shared first, fall back
+  # to static. src/util/CMakeLists.txt already handles either target.
+  find_package(spirv_cross_c_shared QUIET)
+  if(NOT spirv_cross_c_shared_FOUND)
+    # Static spirv-cross: spirv_cross_c imports the spirv-cross-c target which
+    # references siblings (glsl/hlsl/msl/cpp/reflect/core). Each ships its own
+    # cmake config; we have to load all so the imported targets resolve.
+    foreach(_spvc_comp core glsl hlsl msl cpp reflect c)
+      find_package(spirv_cross_${_spvc_comp} REQUIRED)
+    endforeach()
+  endif()
 endif()
 
 if(LINUX)
@@ -338,8 +349,8 @@ SPIRV_CROSS_DIR=$(fetch spirv-cross "https://github.com/KhronosGroup/SPIRV-Cross
 build_cmake spirv-cross "$SPIRV_CROSS_DIR" \
   -DSPIRV_CROSS_CLI=OFF \
   -DSPIRV_CROSS_ENABLE_TESTS=OFF \
-  -DSPIRV_CROSS_SHARED=ON \
-  -DSPIRV_CROSS_STATIC=OFF
+  -DSPIRV_CROSS_SHARED=OFF \
+  -DSPIRV_CROSS_STATIC=ON
 
 # 10. shaderc (depends on glslang + SPIRV-Tools, pulls them in)
 if [ ! -d "$SRC_DIR/shaderc" ]; then
