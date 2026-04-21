@@ -25,7 +25,7 @@ if(NOT CMAKE_BUILD_TYPE MATCHES "Debug|Devel|MinSizeRel|RelWithDebInfo|Release")
   message(FATAL_ERROR "CMAKE_BUILD_TYPE not set. Please set it first.")
 endif()
 
-set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/CMakeModules/")
+set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/CMakeModules/" "${CMAKE_SOURCE_DIR}/cmake/")
 
 set(BUILD_LIBRETRO ON CACHE BOOL "Build the GooseStation libretro core" FORCE)
 
@@ -92,7 +92,10 @@ cat > 'CMakeModules/GooseAndroidDepsAliases.cmake' <<'PATCHEND'
 # provide (deps are built static-only, and upstream shaderc ships no CMake
 # config at all).
 
-if(NOT (BUILD_LIBRETRO AND ANDROID))
+if(NOT BUILD_LIBRETRO)
+  return()
+endif()
+if(NOT (ANDROID OR (WIN32 AND NOT MSVC)))
   return()
 endif()
 
@@ -125,11 +128,16 @@ PATCHEND
 mkdir -p 'CMakeModules'
 # Add: CMakeModules/GooseLibretroLinking.cmake
 cat > 'CMakeModules/GooseLibretroLinking.cmake' <<'PATCHEND'
-# Static-link shaderc and spirv-cross into libretro cores on Android.
-# dlopen is impractical there because RetroArch loads cores with RTLD_LOCAL
-# and the Play Store sandbox makes shipping additional .so files awkward.
+# Static-link shaderc and spirv-cross into libretro cores on Android and on
+# Windows mingw. dlopen is impractical on Android (RetroArch loads cores with
+# RTLD_LOCAL, Play Store sandbox makes shipping extra .so files awkward); on
+# Windows nobody installs shaderc/spirv-cross system-wide, so the same logic
+# applies — bake them into the .dll.
 
-if(NOT (BUILD_LIBRETRO AND ANDROID))
+if(NOT BUILD_LIBRETRO)
+  return()
+endif()
+if(NOT (ANDROID OR (WIN32 AND NOT MSVC)))
   return()
 endif()
 
@@ -383,8 +391,29 @@ add_library(PNG::PNG INTERFACE IMPORTED)
 set_target_properties(PNG::PNG PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${PC_PNG_INCLUDE_DIRS}"
     INTERFACE_LINK_LIBRARIES "${PC_PNG_LIBRARIES}"
+    INTERFACE_LINK_DIRECTORIES "${PC_PNG_LIBRARY_DIRS}"
 )
 mark_as_advanced(PC_PNG_INCLUDE_DIRS PC_PNG_LIBRARIES)
+PATCHEND
+mkdir -p 'cmake'
+# Add: cmake/FindShaderc.cmake
+cat > 'cmake/FindShaderc.cmake' <<'PATCHEND'
+# Findshaderc.cmake — pkg-config wrapper for GooseStation libretro builds
+# DuckStation expects Shaderc::shaderc_shared target
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PC_shaderc REQUIRED IMPORTED_TARGET shaderc)
+
+find_library(shaderc_LIBRARY NAMES shaderc_shared
+             HINTS ${PC_shaderc_LIBRARY_DIRS})
+
+add_library(Shaderc::shaderc_shared UNKNOWN IMPORTED)
+set_target_properties(Shaderc::shaderc_shared PROPERTIES
+    IMPORTED_LOCATION "${shaderc_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${PC_shaderc_INCLUDE_DIRS}"
+    INTERFACE_COMPILE_DEFINITIONS "SHADERC_SHAREDLIB"
+)
+mark_as_advanced(shaderc_LIBRARY)
 PATCHEND
 mkdir -p 'cmake'
 # Add: cmake/FindWebP.cmake
@@ -397,13 +426,20 @@ pkg_check_modules(PC_WebP REQUIRED IMPORTED_TARGET libwebp)
 
 find_library(WebP_LIBRARY NAMES webp
              HINTS ${PC_WebP_LIBRARY_DIRS})
+find_library(SharpYuv_LIBRARY NAMES sharpyuv
+             HINTS ${PC_WebP_LIBRARY_DIRS})
 
-add_library(WebP::webp SHARED IMPORTED)
+add_library(WebP::webp UNKNOWN IMPORTED)
 set_target_properties(WebP::webp PROPERTIES
     IMPORTED_LOCATION "${WebP_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${PC_WebP_INCLUDE_DIRS}"
 )
-mark_as_advanced(WebP_LIBRARY)
+if(SharpYuv_LIBRARY)
+    set_target_properties(WebP::webp PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${SharpYuv_LIBRARY}"
+    )
+endif()
+mark_as_advanced(WebP_LIBRARY SharpYuv_LIBRARY)
 PATCHEND
 mkdir -p 'cmake'
 # Add: cmake/Findcpuinfo.cmake
@@ -417,7 +453,7 @@ pkg_check_modules(PC_cpuinfo REQUIRED IMPORTED_TARGET libcpuinfo)
 find_library(cpuinfo_LIBRARY NAMES cpuinfo
              HINTS ${PC_cpuinfo_LIBRARY_DIRS})
 
-add_library(cpuinfo::cpuinfo SHARED IMPORTED)
+add_library(cpuinfo::cpuinfo UNKNOWN IMPORTED)
 set_target_properties(cpuinfo::cpuinfo PROPERTIES
     IMPORTED_LOCATION "${cpuinfo_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${PC_cpuinfo_INCLUDE_DIRS}"
@@ -440,6 +476,25 @@ set_target_properties(freetype PROPERTIES
 mark_as_advanced(PC_freetype_INCLUDE_DIRS)
 PATCHEND
 mkdir -p 'cmake'
+# Add: cmake/Findlibjpeg-turbo.cmake
+cat > 'cmake/Findlibjpeg-turbo.cmake' <<'PATCHEND'
+# Findlibjpeg-turbo.cmake — pkg-config wrapper for GooseStation libretro builds
+# DuckStation expects libjpeg-turbo::jpeg target
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PC_libjpeg REQUIRED IMPORTED_TARGET libjpeg)
+
+find_library(libjpeg_LIBRARY NAMES jpeg
+             HINTS ${PC_libjpeg_LIBRARY_DIRS})
+
+add_library(libjpeg-turbo::jpeg UNKNOWN IMPORTED)
+set_target_properties(libjpeg-turbo::jpeg PROPERTIES
+    IMPORTED_LOCATION "${libjpeg_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${PC_libjpeg_INCLUDE_DIRS}"
+)
+mark_as_advanced(libjpeg_LIBRARY)
+PATCHEND
+mkdir -p 'cmake'
 # Add: cmake/Findplutosvg.cmake
 cat > 'cmake/Findplutosvg.cmake' <<'PATCHEND'
 # Findplutosvg.cmake — pkg-config wrapper for GooseStation libretro builds
@@ -451,7 +506,7 @@ pkg_check_modules(PC_plutosvg REQUIRED IMPORTED_TARGET plutosvg)
 find_library(plutosvg_LIBRARY NAMES plutosvg
              HINTS ${PC_plutosvg_LIBRARY_DIRS})
 
-add_library(plutosvg::plutosvg SHARED IMPORTED)
+add_library(plutosvg::plutosvg UNKNOWN IMPORTED)
 set_target_properties(plutosvg::plutosvg PROPERTIES
     IMPORTED_LOCATION "${plutosvg_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${PC_plutosvg_INCLUDE_DIRS}"
@@ -460,42 +515,39 @@ set_target_properties(plutosvg::plutosvg PROPERTIES
 mark_as_advanced(plutosvg_LIBRARY)
 PATCHEND
 mkdir -p 'cmake'
-# Add: cmake/Findshaderc.cmake
-cat > 'cmake/Findshaderc.cmake' <<'PATCHEND'
-# Findshaderc.cmake — pkg-config wrapper for GooseStation libretro builds
-# DuckStation expects Shaderc::shaderc_shared target
-
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(PC_shaderc REQUIRED IMPORTED_TARGET shaderc)
-
-find_library(shaderc_LIBRARY NAMES shaderc_shared
-             HINTS ${PC_shaderc_LIBRARY_DIRS})
-
-add_library(Shaderc::shaderc_shared SHARED IMPORTED)
-set_target_properties(Shaderc::shaderc_shared PROPERTIES
-    IMPORTED_LOCATION "${shaderc_LIBRARY}"
-    INTERFACE_INCLUDE_DIRECTORIES "${PC_shaderc_INCLUDE_DIRS}"
-    INTERFACE_COMPILE_DEFINITIONS "SHADERC_SHAREDLIB"
-)
-mark_as_advanced(shaderc_LIBRARY)
-PATCHEND
-mkdir -p 'cmake'
 # Add: cmake/Findspirv_cross_c_shared.cmake
 cat > 'cmake/Findspirv_cross_c_shared.cmake' <<'PATCHEND'
-# Findspirv_cross_c_shared.cmake — pkg-config wrapper for GooseStation libretro builds
-# DuckStation expects spirv-cross-c-shared target (note hyphens)
+# Findspirv_cross_c_shared.cmake — pkg-config wrapper for GooseStation libretro builds.
+# DuckStation expects the spirv-cross-c-shared target (note hyphens). When the
+# shared library isn't installed (e.g. our mingw deps build static-only),
+# report not-found and let GooseStationDependencies.cmake fall back to the
+# per-component static spirv_cross_* configs.
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(PC_spirv_cross REQUIRED IMPORTED_TARGET spirv-cross-c-shared)
+find_package(PkgConfig QUIET)
+if(NOT PKG_CONFIG_FOUND)
+  set(spirv_cross_c_shared_FOUND FALSE)
+  return()
+endif()
+
+pkg_check_modules(PC_spirv_cross QUIET IMPORTED_TARGET spirv-cross-c-shared)
+if(NOT PC_spirv_cross_FOUND)
+  set(spirv_cross_c_shared_FOUND FALSE)
+  return()
+endif()
 
 find_library(spirv_cross_LIBRARY NAMES spirv-cross-c-shared
              HINTS ${PC_spirv_cross_LIBRARY_DIRS})
+if(NOT spirv_cross_LIBRARY)
+  set(spirv_cross_c_shared_FOUND FALSE)
+  return()
+endif()
 
-add_library(spirv-cross-c-shared SHARED IMPORTED)
+add_library(spirv-cross-c-shared UNKNOWN IMPORTED)
 set_target_properties(spirv-cross-c-shared PROPERTIES
     IMPORTED_LOCATION "${spirv_cross_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${PC_spirv_cross_INCLUDE_DIRS}"
 )
+set(spirv_cross_c_shared_FOUND TRUE)
 mark_as_advanced(spirv_cross_LIBRARY)
 PATCHEND
 mkdir -p 'cmake'
@@ -510,7 +562,7 @@ pkg_check_modules(PC_zstd REQUIRED IMPORTED_TARGET libzstd)
 find_library(zstd_LIBRARY NAMES zstd
              HINTS ${PC_zstd_LIBRARY_DIRS})
 
-add_library(zstd::libzstd_shared SHARED IMPORTED)
+add_library(zstd::libzstd_shared UNKNOWN IMPORTED)
 set_target_properties(zstd::libzstd_shared PROPERTIES
     IMPORTED_LOCATION "${zstd_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${PC_zstd_INCLUDE_DIRS}"
@@ -665,12 +717,43 @@ wq
 PATCHEND
 # Modify: src/common/CMakeLists.txt
 ed -s 'src/common/CMakeLists.txt' <<'PATCHEND'
+88s/^/  /
 115s/^/  /
 115a
   endif()
 .
 114a
   if(NOT BUILD_LIBRETRO)
+.
+88a
+  else()
+    # mingw: equivalents of OneCore.lib for VirtualAlloc2/PathCchCanonicalizeEx etc.
+    target_link_libraries(common PRIVATE pathcch onecore)
+  endif()
+.
+87a
+  if(MSVC)
+    target_sources(common PRIVATE
+      thirdparty/StackWalker.cpp
+      thirdparty/StackWalker.h
+    )
+.
+84,85d
+wq
+PATCHEND
+# Modify: src/common/align.h
+ed -s 'src/common/align.h' <<'PATCHEND'
+110d
+109a
+#ifdef _WIN32
+.
+95d
+94a
+#ifdef _WIN32
+.
+12d
+11a
+#ifdef _WIN32
 .
 wq
 PATCHEND
@@ -708,6 +791,69 @@ void CrashHandler::CrashSignalHandler(int, siginfo_t*, void*) {}
 281a
 #elif !defined(__APPLE__) && (!defined(__ANDROID__) || defined(__LIBRETRO__))
 .
+17d
+16a
+#include <dbghelp.h>
+.
+13d
+12a
+#if defined(_WIN32) && !defined(_MSC_VER)
+
+bool CrashHandler::Install(CleanupHandler) { return false; }
+void CrashHandler::SetWriteDirectory(std::string_view) {}
+void CrashHandler::WriteDumpForCaller(std::string_view) {}
+
+#elif defined(_WIN32)
+.
+wq
+PATCHEND
+# Modify: src/common/fastjmp.cpp
+ed -s 'src/common/fastjmp.cpp' <<'PATCHEND'
+2a
+
+// mingw fallback: use plain setjmp/longjmp (no MASM available).
+#if defined(_WIN32) && !defined(_MSC_VER) && !defined(_M_ARM64)
+#include "fastjmp.h"
+#include <csetjmp>
+static_assert(sizeof(std::jmp_buf) <= sizeof(fastjmp_buf), "jmp_buf fits in fastjmp_buf");
+extern "C" int fastjmp_set(fastjmp_buf* buf)
+{
+  return setjmp(*reinterpret_cast<std::jmp_buf*>(buf->buf));
+}
+extern "C" [[noreturn]] void fastjmp_jmp(const fastjmp_buf* buf, int ret)
+{
+  longjmp(*reinterpret_cast<std::jmp_buf*>(const_cast<std::uint8_t*>(buf->buf)), ret);
+}
+#endif
+.
+wq
+PATCHEND
+# Modify: src/common/fastjmp.h
+ed -s 'src/common/fastjmp.h' <<'PATCHEND'
+14a
+#elif defined(_WIN32) && defined(__GNUC__) && defined(__x86_64__)
+  static constexpr std::size_t BUF_SIZE = 512;
+.
+13d
+12a
+#if defined(_WIN32) && !defined(__GNUC__) && defined(_M_AMD64)
+.
+wq
+PATCHEND
+# Modify: src/common/fifo_queue.h
+ed -s 'src/common/fifo_queue.h' <<'PATCHEND'
+244d
+243a
+#ifdef _WIN32
+.
+222d
+221a
+#ifdef _WIN32
+.
+11d
+10a
+#ifdef _WIN32
+.
 wq
 PATCHEND
 # Modify: src/common/file_system.cpp
@@ -723,6 +869,26 @@ ed -s 'src/common/file_system.cpp' <<'PATCHEND'
 268d
 267a
 #if !defined(__ANDROID__) || defined(__LIBRETRO__)
+.
+wq
+PATCHEND
+# Modify: src/common/heap_array.h
+ed -s 'src/common/heap_array.h' <<'PATCHEND'
+483d
+482a
+#ifdef _WIN32
+.
+453d
+452a
+#ifdef _WIN32
+.
+130d
+129a
+#ifdef _WIN32
+.
+108d
+107a
+#ifdef _WIN32
 .
 wq
 PATCHEND
@@ -758,6 +924,27 @@ static int android_memfd_create(const char* name, unsigned int flags)
   return static_cast<int>(syscall(__NR_memfd_create, name, flags));
 }
 #endif
+.
+18d
+17a
+#include <psapi.h>
+.
+wq
+PATCHEND
+# Modify: src/common/threading.cpp
+ed -s 'src/common/threading.cpp' <<'PATCHEND'
+639a
+#elif defined(_WIN32)
+  // mingw: no SEH, no-op.
+  (void)name;
+.
+wq
+PATCHEND
+# Modify: src/common/time_helpers.h
+ed -s 'src/common/time_helpers.h' <<'PATCHEND'
+15d
+14a
+#ifdef _WIN32
 .
 wq
 PATCHEND
@@ -903,6 +1090,15 @@ ed -s 'src/core/bios.h' <<'PATCHEND'
 .
 wq
 PATCHEND
+# Modify: src/core/bus.cpp
+ed -s 'src/core/bus.cpp' <<'PATCHEND'
+53,54d
+52a
+__declspec(dllexport) uintptr_t RAM;
+__declspec(dllexport) u32 RAM_SIZE, RAM_MASK;
+.
+wq
+PATCHEND
 # Modify: src/core/cdrom.cpp
 ed -s 'src/core/cdrom.cpp' <<'PATCHEND'
 4361a
@@ -955,6 +1151,10 @@ ed -s 'src/core/core.cpp' <<'PATCHEND'
 48d
 47a
 #if !defined(__ANDROID__) || defined(__LIBRETRO__)
+.
+31d
+30a
+#include <shlobj.h>
 .
 wq
 PATCHEND
@@ -1939,6 +2139,10 @@ static void StopMediaCapture(std::unique_ptr<MediaCapture> cap)
 100a
 #ifndef __LIBRETRO__
 .
+97d
+96a
+#include <objbase.h>
+.
 82a
 #endif
 .
@@ -2281,6 +2485,15 @@ set_target_properties(goosestation_libretro PROPERTIES POSITION_INDEPENDENT_CODE
 if(NOT WIN32)
   target_link_options(goosestation_libretro PRIVATE
     "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/link.T"
+  )
+endif()
+
+# mingw: bake gcc/c++/pthread runtimes into the DLL so it doesn't need
+# libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll alongside.
+if(WIN32 AND NOT MSVC)
+  target_link_options(goosestation_libretro PRIVATE
+    -static-libgcc -static-libstdc++
+    "LINKER:-Bstatic,--whole-archive,-lwinpthread,--no-whole-archive,-Bdynamic"
   )
 endif()
 
@@ -14567,6 +14780,14 @@ ed -s 'src/util/cd_image.cpp' <<'PATCHEND'
 .
 wq
 PATCHEND
+# Modify: src/util/cd_image_device.cpp
+ed -s 'src/util/cd_image_device.cpp' <<'PATCHEND'
+184d
+183a
+#if defined(_WIN32) && defined(_MSC_VER)
+.
+wq
+PATCHEND
 # Modify: src/util/core_audio_stream.cpp
 ed -s 'src/util/core_audio_stream.cpp' <<'PATCHEND'
 928a
@@ -14679,6 +14900,10 @@ wq
 PATCHEND
 # Modify: src/util/gpu_device.cpp
 ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
+1702d
+1701a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
 1585a
 #endif
 .
@@ -14805,9 +15030,21 @@ static const char* shaderc_compilation_status_to_string_fallback(shaderc_compila
 1383a
 DYN_SHADERC_OPTIONAL_FUNCTIONS(ADD_FUNC)
 .
+1353d
+1352a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
 461,462d
 460a
       WARNING_LOG("Non-standard GPU device flags: {}", message);
+.
+405d
+404a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
+32d
+31a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
 .
 28d
 10d
@@ -14890,9 +15127,21 @@ inline constexpr float DEFAULT_SCREEN_MARGIN = 10.0f;
 PATCHEND
 # Modify: src/util/input_manager.cpp
 ed -s 'src/util/input_manager.cpp' <<'PATCHEND'
+2660d
+2659a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
 2602d
 2601a
 #if defined(__ANDROID__) && !defined(__LIBRETRO__)
+.
+2580d
+2579a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
+2373d
+2372a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
 .
 1933,1934d
 1932a
@@ -14913,12 +15162,20 @@ ed -s 'src/util/input_manager.cpp' <<'PATCHEND'
 1752a
 #ifndef __LIBRETRO__
 .
+1626d
+1625a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
 1591d
 1590a
   const bool hide_mouse_cursor = has_relative_mode_bindings;
 .
 1556,1558d
 1529,1530d
+1493d
+1492a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
 1458,1462d
 1424,1440d
 959a
@@ -14928,6 +15185,30 @@ ed -s 'src/util/input_manager.cpp' <<'PATCHEND'
 #ifdef __LIBRETRO__
   return;
 #else
+.
+818d
+817a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
+787d
+786a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
+268d
+267a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
+256d
+255a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
+183d
+182a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
+42d
+41a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
 .
 5d
 wq
@@ -14945,6 +15226,14 @@ inline void OnInputDeviceDisconnected(InputBindingKey, std::string_view) {}
 inline void SetMouseMode(bool, bool) {}
 inline std::optional<WindowInfo> GetTopLevelWindowInfo() { return std::nullopt; }
 #else
+.
+wq
+PATCHEND
+# Modify: src/util/media_capture.cpp
+ed -s 'src/util/media_capture.cpp' <<'PATCHEND'
+35d
+34a
+#include <mferror.h>
 .
 wq
 PATCHEND
@@ -15014,6 +15303,15 @@ ed -s 'src/util/opengl_context.cpp' <<'PATCHEND'
 148d
 147a
 #elif defined(__ANDROID__) && !defined(__LIBRETRO__)
+.
+144d
+143a
+#if defined(_WIN32) && defined(__LIBRETRO__)
+  // libretro frontend manages the GL context; no creation here.
+  (void)surface;
+  (void)versions_to_try;
+  Error::SetStringView(error, "OpenGL context creation not used in libretro build");
+#elif defined(_WIN32) && !defined(_M_ARM64)
 .
 25a
 #include "opengl_context_egl.h"
@@ -15518,6 +15816,14 @@ ed -s 'src/util/vulkan_loader.h' <<'PATCHEND'
 /// Loads instance-level function pointers from the provided instance.
 bool AdoptExternalInstance(VkInstance instance, PFN_vkGetInstanceProcAddr get_instance_proc_addr, Error* error);
 
+.
+wq
+PATCHEND
+# Modify: src/util/xinput_source.h
+ed -s 'src/util/xinput_source.h' <<'PATCHEND'
+7d
+6a
+#include <xinput.h>
 .
 wq
 PATCHEND
