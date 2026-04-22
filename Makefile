@@ -107,6 +107,7 @@ $(LINUX_UNSTRIPPED): prepare $(LINUX_DEPS_DIR)/.deps-ready
 	@$(CMAKE) --build $(BUILD_ROOT)/linux --parallel $(JOBS) --target goosestation_libretro
 	@mkdir -p $(DIST_DIR)
 	@cp $(LINUX_BUILT) $@
+	@cp $(ROOT)/goosestation_libretro.info $(DIST_DIR)/goosestation_libretro.info
 	@echo ""
 	@echo "Linux core built (unstripped):"
 	@echo "  $@"
@@ -147,6 +148,7 @@ $(ANDROID_UNSTRIPPED): prepare $(ANDROID_DEPS_DIR)/.deps-ready
 	@$(CMAKE) --build $(BUILD_ROOT)/android --parallel $(JOBS) --target goosestation_libretro
 	@mkdir -p $(DIST_DIR)/android
 	@cp $(ANDROID_BUILT) $@
+	@cp $(ROOT)/goosestation_libretro.info $(DIST_DIR)/android/goosestation_libretro.info
 	@echo ""
 	@echo "Android core built (unstripped):"
 	@echo "  $@"
@@ -207,6 +209,7 @@ $(WINDOWS_UNSTRIPPED): prepare $(MINGW_DEPS_DIR)/.deps-ready
 	@$(CMAKE) --build $(BUILD_ROOT)/windows --parallel $(JOBS) --target goosestation_libretro
 	@mkdir -p $(DIST_DIR)/windows
 	@cp $(WINDOWS_BUILT) $@
+	@cp $(ROOT)/goosestation_libretro.info $(DIST_DIR)/windows/goosestation_libretro.info
 	@echo ""
 	@echo "Windows core built (unstripped):"
 	@echo "  $@"
