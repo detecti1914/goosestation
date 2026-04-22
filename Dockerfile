@@ -19,8 +19,16 @@ FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Set native compilers to Clang
+ENV CC=clang
+ENV CXX=clang++
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
+        make \
+        libc6-dev \
+        clang \
+        llvm-dev \
+        lld \
         cmake \
         ninja-build \
         git \
@@ -46,21 +54,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libspirv-cross-c-shared-dev \
         libvulkan-dev \
         nasm \
-        mingw-w64 \
+        # Install only the posix-threads mingw-w64 variant. The default `mingw-w64`
+        # metapackage also pulls the win32-threads variant, whose libstdc++ lacks
+        # the __emutls_v._ZSt1{1,5}__once_call{,able} symbols we need for
+        # std::call_once. Clang auto-discovers whichever 14-* directory exists, so
+        # only having 14-posix present keeps it honest.
+        binutils-mingw-w64-x86-64 \
+        gcc-mingw-w64-x86-64-posix \
+        g++-mingw-w64-x86-64-posix \
+        mingw-w64-x86-64-dev \
         mingw-w64-tools \
         file \
     && rm -rf /var/lib/apt/lists/* \
-    && update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix \
-    && update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+    && ln -sf llvm-ml-19 /usr/bin/llvm-ml
 
-# Android NDK r28b (matches what the README is tested with).
+# Android NDK r28b
 ENV ANDROID_NDK_VERSION=r28b
 ENV ANDROID_NDK=/opt/android-ndk
 RUN mkdir -p /opt && cd /tmp \
     && curl -fsSLO "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_VERSION}-linux.zip" \
     && unzip -q "android-ndk-${ANDROID_NDK_VERSION}-linux.zip" -d /opt \
     && mv "/opt/android-ndk-${ANDROID_NDK_VERSION}" "${ANDROID_NDK}" \
-    && rm -f "/tmp/android-ndk-${ANDROID_NDK_VERSION}-linux.zip"
+    && rm -f "/tmp/android-ndk-${ANDROID_NDK_VERSION}-linux.zip" \
+    # Prune unused NDK sysroots to save space (safely keeps the bin/ toolchain)
+    && rm -rf "${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/i686-linux-android" \
+    && rm -rf "${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android"
+
 
 WORKDIR /work
 COPY . /work

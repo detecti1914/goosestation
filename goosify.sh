@@ -184,10 +184,7 @@ find_package(zstd REQUIRED)
 find_package(WebP REQUIRED)
 find_package(PNG REQUIRED)
 find_package(libjpeg-turbo REQUIRED)
-find_package(freetype REQUIRED)
-find_package(plutosvg REQUIRED)
 find_package(cpuinfo REQUIRED)
-find_package(libzip REQUIRED)
 
 if(ENABLE_VULKAN)
   if(NOT ANDROID)
@@ -718,12 +715,23 @@ PATCHEND
 # Modify: src/common/CMakeLists.txt
 ed -s 'src/common/CMakeLists.txt' <<'PATCHEND'
 88s/^/  /
+93,95s/^  //
+97,98s/^  //
 115s/^/  /
 115a
   endif()
 .
 114a
   if(NOT BUILD_LIBRETRO)
+.
+99d
+96d
+95a
+elseif(MSVC AND (CPU_ARCH_ARM32 OR CPU_ARCH_ARM64))
+.
+91,92d
+90a
+if(WIN32 AND CPU_ARCH_X64)
 .
 88a
   else()
@@ -804,27 +812,6 @@ void CrashHandler::SetWriteDirectory(std::string_view) {}
 void CrashHandler::WriteDumpForCaller(std::string_view) {}
 
 #elif defined(_WIN32)
-.
-wq
-PATCHEND
-# Modify: src/common/fastjmp.cpp
-ed -s 'src/common/fastjmp.cpp' <<'PATCHEND'
-2a
-
-// mingw fallback: use plain setjmp/longjmp (no MASM available).
-#if defined(_WIN32) && !defined(_MSC_VER) && !defined(_M_ARM64)
-#include "fastjmp.h"
-#include <csetjmp>
-static_assert(sizeof(std::jmp_buf) <= sizeof(fastjmp_buf), "jmp_buf fits in fastjmp_buf");
-extern "C" int fastjmp_set(fastjmp_buf* buf)
-{
-  return setjmp(*reinterpret_cast<std::jmp_buf*>(buf->buf));
-}
-extern "C" [[noreturn]] void fastjmp_jmp(const fastjmp_buf* buf, int ret)
-{
-  longjmp(*reinterpret_cast<std::jmp_buf*>(const_cast<std::uint8_t*>(buf->buf)), ret);
-}
-#endif
 .
 wq
 PATCHEND
@@ -925,6 +912,16 @@ static int android_memfd_create(const char* name, unsigned int flags)
 }
 #endif
 .
+142a
+  }
+.
+140,141d
+139a
+  HMODULE mod = nullptr;
+  if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          reinterpret_cast<LPCWSTR>(&GetBaseAddress), &mod))
+  {
+.
 18d
 17a
 #include <psapi.h>
@@ -958,7 +955,7 @@ endif()
 153a
 if(BUILD_LIBRETRO)
   target_sources(core PRIVATE hotkeys_stub.cpp)
-  target_link_libraries(core PRIVATE xxhash rapidyaml cpuinfo::cpuinfo ZLIB::ZLIB zstd::libzstd_shared libzip::zip speex_resampler_headers)
+  target_link_libraries(core PRIVATE xxhash rapidyaml cpuinfo::cpuinfo speex_resampler_headers)
 else()
   target_sources(core PRIVATE hotkeys.cpp)
 .
@@ -1125,6 +1122,26 @@ ed -s 'src/core/cdrom.cpp' <<'PATCHEND'
 7a
 
 #include "common/progress_callback.h"
+.
+wq
+PATCHEND
+# Modify: src/core/cheats.cpp
+ed -s 'src/core/cheats.cpp' <<'PATCHEND'
+156a
+#else
+  ALWAYS_INLINE bool IsOpen() const { return false; }
+  bool Open(bool) { return false; }
+  std::optional<std::string> ReadFile(const char*) const { return std::nullopt; }
+#endif
+.
+103a
+#ifndef __LIBRETRO__
+.
+25a
+#endif
+.
+24a
+#ifndef __LIBRETRO__
 .
 wq
 PATCHEND
@@ -2097,6 +2114,12 @@ ed -s 'src/core/system.cpp' <<'PATCHEND'
     ((is_duplicate_frame || (s_state.throttler_enabled && !s_state.optimal_frame_pacing &&
                              current_time > s_state.next_frame_time &&
 .
+2048a
+#endif
+.
+2045a
+#ifndef __LIBRETRO__
+.
 1721a
 
 #ifdef __LIBRETRO__
@@ -2118,6 +2141,10 @@ ed -s 'src/core/system.cpp' <<'PATCHEND'
 .
 815a
 #ifndef __LIBRETRO__
+.
+540d
+539a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
 .
 186a
 
@@ -2485,6 +2512,7 @@ set_target_properties(goosestation_libretro PROPERTIES POSITION_INDEPENDENT_CODE
 if(NOT WIN32)
   target_link_options(goosestation_libretro PRIVATE
     "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/link.T"
+    "LINKER:--no-undefined"
   )
 endif()
 
@@ -11427,8 +11455,8 @@ void Host::SetDefaultSettings(SettingsInterface& si)
   si.SetBoolValue("BIOS", "PatchFastBoot", false);
   si.SetFloatValue("Main", "EmulationSpeed", 0.0f);
 
-  for (u32 i = 0; i < static_cast<u32>(InputSourceType::Count); i++)
-    si.SetBoolValue("InputSources", InputManager::InputSourceToString(static_cast<InputSourceType>(i)), false);
+  si.SetBoolValue("InputSources", "Keyboard", false);
+  si.SetBoolValue("InputSources", "Pointer", false);
 }
 
 void Host::OnSettingsResetToDefault(bool host, bool system, bool controller)
@@ -11637,7 +11665,7 @@ bool LibretroHost::InitializeFoldersAndConfig(Error* error)
   SettingsInterface& si = *Core::GetBaseSettingsLayer();
   si.SetStringValue("GPU", "Renderer", Settings::GetRendererName(GPURenderer::Software));
   si.SetBoolValue("GPU", "UseThread", false);
-  si.SetBoolValue("GPU", "DisableShaderCache", true);
+  si.SetBoolValue("GPU", "DisableShaderCache", false);
   si.SetStringValue("Audio", "Backend", AudioStream::GetBackendName(AudioBackend::Null));
   si.SetStringValue("Pad1", "Type", Controller::GetControllerInfo(ControllerType::AnalogController).name);
   si.SetStringValue("Pad2", "Type", Controller::GetControllerInfo(ControllerType::None).name);
@@ -11653,8 +11681,8 @@ bool LibretroHost::InitializeFoldersAndConfig(Error* error)
 
   si.SetStringValue("BIOS", "SearchDirectory", s_system_directory.c_str());
 
-  for (u32 i = 0; i < static_cast<u32>(InputSourceType::Count); i++)
-    si.SetBoolValue("InputSources", InputManager::InputSourceToString(static_cast<InputSourceType>(i)), false);
+  si.SetBoolValue("InputSources", "Keyboard", false);
+  si.SetBoolValue("InputSources", "Pointer", false);
 
   EmuFolders::LoadConfig(si);
 
@@ -14188,7 +14216,12 @@ RETRO_API void retro_init(void)
   Log::RegisterCallback(DuckStationLogCallback, nullptr);
 
   Error error;
-  if (!System::PerformEarlyHardwareChecks(&error) || !System::ProcessStartup(&error))
+  if (!System::PerformEarlyHardwareChecks(&error)) {
+    LibretroLog(RETRO_LOG_ERROR, "[GooseStation] EarlyHWChecks failed: %s\n", error.GetDescription().c_str());
+    return;
+  }
+
+  if (!System::ProcessStartup(&error))
   {
     LibretroLog(RETRO_LOG_ERROR, "[GooseStation] ProcessStartup() failed: %s\n", error.GetDescription().c_str());
     return;
@@ -14213,7 +14246,7 @@ RETRO_API void retro_init(void)
 
   LibretroHost::s_video_thread.Start(&LibretroHost::VideoThreadEntryPoint);
 
-  LibretroLog(RETRO_LOG_INFO, "[GooseStation] Initialized successfully (built " __DATE__ " " __TIME__ ")\n");
+  LibretroLog(RETRO_LOG_INFO, "[GooseStation] Initialized successfully\n");
 }
 
 RETRO_API void retro_deinit(void)
@@ -14712,9 +14745,9 @@ target_precompile_headers(util PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/pch.h")
 target_include_directories(util PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
 target_include_directories(util PRIVATE "${PROJECT_SOURCE_DIR}/dep/imgui/include")
 target_link_libraries(util PUBLIC common)
-target_link_libraries(util PRIVATE libchdr lzma libjpeg-turbo::jpeg PNG::PNG WebP::webp plutosvg::plutosvg ZLIB::ZLIB xxhash zstd::libzstd_shared)
+target_link_libraries(util PRIVATE libchdr lzma PNG::PNG xxhash libjpeg-turbo::jpeg WebP::webp ZLIB::ZLIB zstd::libzstd_shared)
 if(NOT BUILD_LIBRETRO)
-  target_link_libraries(util PRIVATE SoundTouch::SoundTouchDLL)
+  target_link_libraries(util PRIVATE plutosvg::plutosvg SoundTouch::SoundTouchDLL)
 .
 86,97d
 85a
@@ -15055,6 +15088,22 @@ ed -s 'src/util/gpu_device.h' <<'PATCHEND'
 25a
 #include <unordered_map>
 .
+wq
+PATCHEND
+# Modify: src/util/image.cpp
+ed -s 'src/util/image.cpp' <<'PATCHEND'
+426a
+#endif
+.
+390a
+#ifndef __LIBRETRO__
+.
+24a
+#ifndef __LIBRETRO__
+#include <plutosvg.h>
+#endif
+.
+21d
 wq
 PATCHEND
 # Modify: src/util/imgui_manager.h
