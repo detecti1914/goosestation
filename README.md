@@ -31,7 +31,7 @@ Runtime/build libs (Arch/aur package names shown; adapt to your distro):
 
   To override: `make android ANDROID_NDK=/path/to/ndk`.
 - First `make android` run cross-compiles all native deps (shaderc,
-  spirv-cross, freetype, libpng, etc.) into `src/.../build-android/deps/`.
+  spirv-cross, libpng, etc.) into `.cache/android/deps/`.
 - Defaults: `ANDROID_ABI=arm64-v8a`, `ANDROID_PLATFORM=android-28`
 
 ## Usage

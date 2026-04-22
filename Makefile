@@ -72,21 +72,13 @@ $(SRC_DIR)/.goosified: $(GOOSIFY) $(TARBALL)
 	@echo "==> Goosifying..."
 	@cp $(GOOSIFY) $(SRC_DIR)/goosify.sh
 	@cd $(SRC_DIR) && bash ./goosify.sh
-	@# Let env NDK override the hardcoded path inside build-android-deps.sh.
-	@sed -i 's|^NDK=/opt/android-sdk/ndk/.*|NDK="$${NDK:-&}"|' $(SRC_DIR)/build-android-deps.sh
-	@# Allow BUILD_DIR override (so we can redirect into .cache/) and skip the
-	@# per-package `rm -rf $$builddir` so cached object files survive reruns.
-	@sed -i 's|^BUILD_DIR="$$SCRIPT_DIR/build-android"|BUILD_DIR="$${BUILD_DIR:-$$SCRIPT_DIR/build-android}"|' $(SRC_DIR)/build-android-deps.sh
-	@sed -i '/^  rm -rf "\$$builddir"$$/d' $(SRC_DIR)/build-android-deps.sh
 	@touch $@
 
 LINUX_BUILT := $(BUILD_ROOT)/linux/src/goosestation-libretro/goosestation_libretro.so
 LINUX_UNSTRIPPED := $(DIST_DIR)/goosestation_libretro_linux.unstripped.so
 LINUX_SO := $(DIST_DIR)/goosestation_libretro_linux.so
 
-# Cache android deps under .cache/ (build-android-deps.sh hardcodes its prefix
-# as $SCRIPT_DIR/build-android by default; we override via BUILD_DIR env after
-# patching the script in `prepare`).
+# Cache android deps under .cache/ so they survive `make clean` and `--rm` containers.
 ANDROID_BUILD_DIR := $(CACHE_DIR)/android
 ANDROID_DEPS_DIR := $(ANDROID_BUILD_DIR)/deps
 
@@ -166,16 +158,10 @@ $(ANDROID_SO): $(ANDROID_UNSTRIPPED)
 	@echo "Android core built (stripped):"
 	@echo "  $@"
 
-$(ANDROID_DEPS_DIR)/.deps-ready: $(SRC_DIR)/.goosified
+$(ANDROID_DEPS_DIR)/.deps-ready: $(ROOT)/build-android-deps.sh
 	@test -d "$(ANDROID_NDK)" || { echo "ERROR: ANDROID_NDK not found at $(ANDROID_NDK). Set ANDROID_NDK=/path/to/ndk"; exit 1; }
 	@echo "==> Building Android dependencies (cached at $(ANDROID_BUILD_DIR))..."
-	@cd $(SRC_DIR) && NDK=$(ANDROID_NDK) BUILD_DIR=$(ANDROID_BUILD_DIR) bash ./build-android-deps.sh
-	@# plutovg's CMake build doesn't ship a .pc file; plutosvg.pc requires it.
-	@# (Same workaround as build-mingw-deps.sh.) On Arch host this is satisfied
-	@# by the system plutovg pkg; in the docker image there's nothing.
-	@mkdir -p $(ANDROID_DEPS_DIR)/lib/pkgconfig
-	@printf 'prefix=%s\nexec_prefix=$${prefix}\nlibdir=$${prefix}/lib\nincludedir=$${prefix}/include\n\nName: PlutoVG\nDescription: stub\nVersion: 1.0.0\nCflags: -I$${includedir}/plutovg -DPLUTOVG_BUILD_STATIC\nLibs: -L$${libdir} -lplutovg\nLibs.private: -lm\n' \
-		"$(ANDROID_DEPS_DIR)" > $(ANDROID_DEPS_DIR)/lib/pkgconfig/plutovg.pc
+	@NDK=$(ANDROID_NDK) ANDROID_ABI=$(ANDROID_ABI) BUILD_DIR=$(ANDROID_BUILD_DIR) bash $(ROOT)/build-android-deps.sh
 	@touch $@
 
 WINDOWS_BUILT := $(BUILD_ROOT)/windows/bin/goosestation_libretro.dll

@@ -2,8 +2,7 @@
 ###
 ### Usage:
 ###   docker build -t goosestation-builder .
-###   docker run --rm -v "$PWD/dist:/work/dist" -v "$PWD/.cache:/work/.cache" \
-###       goosestation-builder windows android
+###   docker run --rm -v "$PWD/dist:/work/dist" -v "$PWD/.cache:/work/.cache" goosestation-builder linux
 ###
 ### Arguments after the image name are passed straight to `make` inside the
 ### container - pass any of: linux, android, windows, clean, distclean, help, etc.
@@ -13,7 +12,7 @@
 ###   dist/android/goosestation_libretro.so
 ###   etc
 ###
-### .cache/ caches the upstream tarball + Android NDK download across runs.
+### .cache/ caches the upstream tarballs
 
 FROM debian:trixie-slim
 
@@ -54,11 +53,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libspirv-cross-c-shared-dev \
         libvulkan-dev \
         nasm \
-        # Install only the posix-threads mingw-w64 variant. The default `mingw-w64`
-        # metapackage also pulls the win32-threads variant, whose libstdc++ lacks
-        # the __emutls_v._ZSt1{1,5}__once_call{,able} symbols we need for
-        # std::call_once. Clang auto-discovers whichever 14-* directory exists, so
-        # only having 14-posix present keeps it honest.
         binutils-mingw-w64-x86-64 \
         gcc-mingw-w64-x86-64-posix \
         g++-mingw-w64-x86-64-posix \

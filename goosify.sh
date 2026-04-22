@@ -179,10 +179,10 @@ if(NOT WIN32 AND NOT APPLE AND NOT ANDROID)
   find_package(PkgConfig REQUIRED)
 endif()
 
+find_package(PNG REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(zstd REQUIRED)
 find_package(WebP REQUIRED)
-find_package(PNG REQUIRED)
 find_package(libjpeg-turbo REQUIRED)
 find_package(cpuinfo REQUIRED)
 
@@ -213,167 +213,6 @@ if(NOT FFMPEG_FOUND)
 endif()
 
 include("${CMAKE_SOURCE_DIR}/CMakeModules/GooseAndroidDepsAliases.cmake")
-PATCHEND
-# Add: build-android-deps.sh
-cat > 'build-android-deps.sh' <<'PATCHEND'
-#!/bin/bash
-# Cross-compile GooseStation libretro dependencies for Android ARM64
-set -euo pipefail
-
-NDK=/opt/android-sdk/ndk/28.2.13676358
-TOOLCHAIN=$NDK/build/cmake/android.toolchain.cmake
-ABI=arm64-v8a
-API=26
-JOBS=$(nproc)
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/build-android"
-PREFIX="$BUILD_DIR/deps"
-SRC_DIR="$BUILD_DIR/deps-src"
-
-mkdir -p "$PREFIX" "$SRC_DIR"
-
-CMAKE_COMMON=(
-  -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"
-  -DANDROID_ABI="$ABI"
-  -DANDROID_PLATFORM=android-$API
-  -DCMAKE_BUILD_TYPE=Release
-  -DCMAKE_INSTALL_PREFIX="$PREFIX"
-  -DCMAKE_PREFIX_PATH="$PREFIX"
-  -DCMAKE_FIND_ROOT_PATH="$PREFIX"
-  -DBUILD_SHARED_LIBS=OFF
-  -DBUILD_TESTING=OFF
-)
-
-fetch() {
-  local name=$1 url=$2
-  local archive="$SRC_DIR/$(basename "$url")"
-  if [ ! -f "$archive" ]; then
-    echo "Fetching $name..." >&2
-    wget -q -O "$archive" "$url"
-  fi
-  local dir="$SRC_DIR/$name"
-  if [ ! -d "$dir" ]; then
-    mkdir -p "$dir"
-    tar xf "$archive" -C "$dir" --strip-components=1
-  fi
-  printf '%s' "$dir"
-}
-
-build_cmake() {
-  local name=$1 srcdir=$2
-  shift 2
-  local builddir="$BUILD_DIR/build-$name"
-  echo "=== Building $name ==="
-  rm -rf "$builddir"
-  mkdir -p "$builddir"
-  cmake -S "$srcdir" -B "$builddir" "${CMAKE_COMMON[@]}" "$@"
-  cmake --build "$builddir" -j"$JOBS"
-  cmake --install "$builddir"
-  echo "=== $name done ==="
-}
-
-# 1. zstd
-ZSTD_DIR=$(fetch zstd "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz")
-build_cmake zstd "$ZSTD_DIR/build/cmake" \
-  -DZSTD_BUILD_PROGRAMS=OFF \
-  -DZSTD_BUILD_SHARED=OFF \
-  -DZSTD_BUILD_STATIC=ON
-
-# 2. libpng
-PNG_DIR=$(fetch libpng "https://downloads.sourceforge.net/project/libpng/libpng16/1.6.47/libpng-1.6.47.tar.xz")
-build_cmake libpng "$PNG_DIR" \
-  -DPNG_SHARED=OFF \
-  -DPNG_STATIC=ON \
-  -DPNG_TESTS=OFF
-
-# 3. libjpeg-turbo
-JPEG_DIR=$(fetch libjpeg-turbo "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.0/libjpeg-turbo-3.1.0.tar.gz")
-build_cmake libjpeg-turbo "$JPEG_DIR" \
-  -DENABLE_SHARED=OFF \
-  -DENABLE_STATIC=ON \
-  -DWITH_TURBOJPEG=OFF
-
-# 4. libwebp
-WEBP_DIR=$(fetch libwebp "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz")
-build_cmake libwebp "$WEBP_DIR" \
-  -DWEBP_BUILD_ANIM_UTILS=OFF \
-  -DWEBP_BUILD_CWEBP=OFF \
-  -DWEBP_BUILD_DWEBP=OFF \
-  -DWEBP_BUILD_GIF2WEBP=OFF \
-  -DWEBP_BUILD_IMG2WEBP=OFF \
-  -DWEBP_BUILD_VWEBP=OFF \
-  -DWEBP_BUILD_WEBPINFO=OFF \
-  -DWEBP_BUILD_WEBPMUX=OFF \
-  -DWEBP_BUILD_EXTRAS=OFF
-
-# 5. freetype (depends on zlib from NDK + libpng)
-FT_DIR=$(fetch freetype "https://downloads.sourceforge.net/project/freetype/freetype2/2.13.3/freetype-2.13.3.tar.xz")
-build_cmake freetype "$FT_DIR" \
-  -DFT_DISABLE_HARFBUZZ=ON \
-  -DFT_DISABLE_BZIP2=ON \
-  -DFT_DISABLE_BROTLI=ON
-
-# 6. plutovg + plutosvg (depends on freetype)
-PLUTOVG_DIR=$(fetch plutovg "https://github.com/sammycage/plutovg/archive/refs/tags/v1.0.0.tar.gz")
-build_cmake plutovg "$PLUTOVG_DIR" \
-  -DPLUTOVG_BUILD_EXAMPLES=OFF
-
-PLUTOSVG_DIR=$(fetch plutosvg "https://github.com/sammycage/plutosvg/archive/refs/tags/v0.0.7.tar.gz")
-build_cmake plutosvg "$PLUTOSVG_DIR" \
-  -DPLUTOSVG_BUILD_EXAMPLES=OFF
-
-# 7. cpuinfo
-if [ ! -d "$SRC_DIR/cpuinfo" ]; then
-  git clone --depth 1 https://github.com/pytorch/cpuinfo.git "$SRC_DIR/cpuinfo"
-fi
-build_cmake cpuinfo "$SRC_DIR/cpuinfo" \
-  -DCPUINFO_BUILD_TOOLS=OFF \
-  -DCPUINFO_BUILD_UNIT_TESTS=OFF \
-  -DCPUINFO_BUILD_MOCK_TESTS=OFF \
-  -DCPUINFO_BUILD_BENCHMARKS=OFF
-
-# 8. libzip (depends on zlib)
-LIBZIP_DIR=$(fetch libzip "https://github.com/nih-at/libzip/releases/download/v1.11.4/libzip-1.11.4.tar.xz")
-build_cmake libzip "$LIBZIP_DIR" \
-  -DENABLE_BZIP2=OFF \
-  -DENABLE_LZMA=OFF \
-  -DENABLE_ZSTD=OFF \
-  -DENABLE_OPENSSL=OFF \
-  -DENABLE_MBEDTLS=OFF \
-  -DENABLE_GNUTLS=OFF \
-  -DENABLE_COMMONCRYPTO=OFF \
-  -DBUILD_TOOLS=OFF \
-  -DBUILD_REGRESS=OFF \
-  -DBUILD_OSSFUZZ=OFF \
-  -DBUILD_EXAMPLES=OFF \
-  -DBUILD_DOC=OFF
-
-# 9. SPIRV-Cross
-SPIRV_CROSS_DIR=$(fetch spirv-cross "https://github.com/KhronosGroup/SPIRV-Cross/archive/refs/tags/vulkan-sdk-1.4.304.1.tar.gz")
-build_cmake spirv-cross "$SPIRV_CROSS_DIR" \
-  -DSPIRV_CROSS_CLI=OFF \
-  -DSPIRV_CROSS_ENABLE_TESTS=OFF \
-  -DSPIRV_CROSS_SHARED=OFF \
-  -DSPIRV_CROSS_STATIC=ON
-
-# 10. shaderc (depends on glslang + SPIRV-Tools, pulls them in)
-if [ ! -d "$SRC_DIR/shaderc" ]; then
-  git clone --depth 1 https://github.com/google/shaderc.git "$SRC_DIR/shaderc"
-  (cd "$SRC_DIR/shaderc" && python3 utils/git-sync-deps)
-fi
-build_cmake shaderc "$SRC_DIR/shaderc" \
-  -DSHADERC_SKIP_TESTS=ON \
-  -DSHADERC_SKIP_EXAMPLES=ON \
-  -DSHADERC_SKIP_COPYRIGHT_CHECK=ON \
-  -DSPIRV_SKIP_TESTS=ON \
-  -DSPIRV_SKIP_EXECUTABLES=ON \
-  -DENABLE_GLSLANG_BINARIES=OFF
-
-echo ""
-echo "=== All dependencies built ==="
-echo "Prefix: $PREFIX"
-ls "$PREFIX/lib/"
 PATCHEND
 mkdir -p 'cmake'
 # Add: cmake/FindPNG.cmake
@@ -458,21 +297,6 @@ set_target_properties(cpuinfo::cpuinfo PROPERTIES
 mark_as_advanced(cpuinfo_LIBRARY)
 PATCHEND
 mkdir -p 'cmake'
-# Add: cmake/Findfreetype.cmake
-cat > 'cmake/Findfreetype.cmake' <<'PATCHEND'
-# Findfreetype.cmake — pkg-config wrapper for GooseStation libretro builds
-# DuckStation expects freetype (headers only, libretro stubs imgui_manager)
-
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(PC_freetype REQUIRED IMPORTED_TARGET freetype2)
-
-add_library(freetype INTERFACE IMPORTED)
-set_target_properties(freetype PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "${PC_freetype_INCLUDE_DIRS}"
-)
-mark_as_advanced(PC_freetype_INCLUDE_DIRS)
-PATCHEND
-mkdir -p 'cmake'
 # Add: cmake/Findlibjpeg-turbo.cmake
 cat > 'cmake/Findlibjpeg-turbo.cmake' <<'PATCHEND'
 # Findlibjpeg-turbo.cmake — pkg-config wrapper for GooseStation libretro builds
@@ -490,26 +314,6 @@ set_target_properties(libjpeg-turbo::jpeg PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${PC_libjpeg_INCLUDE_DIRS}"
 )
 mark_as_advanced(libjpeg_LIBRARY)
-PATCHEND
-mkdir -p 'cmake'
-# Add: cmake/Findplutosvg.cmake
-cat > 'cmake/Findplutosvg.cmake' <<'PATCHEND'
-# Findplutosvg.cmake — pkg-config wrapper for GooseStation libretro builds
-# DuckStation expects plutosvg::plutosvg target
-
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(PC_plutosvg REQUIRED IMPORTED_TARGET plutosvg)
-
-find_library(plutosvg_LIBRARY NAMES plutosvg
-             HINTS ${PC_plutosvg_LIBRARY_DIRS})
-
-add_library(plutosvg::plutosvg UNKNOWN IMPORTED)
-set_target_properties(plutosvg::plutosvg PROPERTIES
-    IMPORTED_LOCATION "${plutosvg_LIBRARY}"
-    INTERFACE_INCLUDE_DIRECTORIES "${PC_plutosvg_INCLUDE_DIRS}"
-    INTERFACE_LINK_LIBRARIES PkgConfig::PC_plutosvg
-)
-mark_as_advanced(plutosvg_LIBRARY)
 PATCHEND
 mkdir -p 'cmake'
 # Add: cmake/Findspirv_cross_c_shared.cmake
@@ -589,18 +393,6 @@ mkdir -p 'cmake/lib/cmake/cpuinfo'
 cat > 'cmake/lib/cmake/cpuinfo/cpuinfoConfig.cmake' <<'PATCHEND'
 get_filename_component(PACKAGE_PREFIX_DIR "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 include("${CMAKE_CURRENT_LIST_DIR}/../../../Findcpuinfo.cmake")
-PATCHEND
-mkdir -p 'cmake/lib/cmake/freetype'
-# Add: cmake/lib/cmake/freetype/freetypeConfig.cmake
-cat > 'cmake/lib/cmake/freetype/freetypeConfig.cmake' <<'PATCHEND'
-get_filename_component(PACKAGE_PREFIX_DIR "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
-include("${CMAKE_CURRENT_LIST_DIR}/../../../Findfreetype.cmake")
-PATCHEND
-mkdir -p 'cmake/lib/cmake/plutosvg'
-# Add: cmake/lib/cmake/plutosvg/plutosvgConfig.cmake
-cat > 'cmake/lib/cmake/plutosvg/plutosvgConfig.cmake' <<'PATCHEND'
-get_filename_component(PACKAGE_PREFIX_DIR "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
-include("${CMAKE_CURRENT_LIST_DIR}/../../../Findplutosvg.cmake")
 PATCHEND
 mkdir -p 'cmake/lib/cmake/spirv_cross_c_shared'
 # Add: cmake/lib/cmake/spirv_cross_c_shared/spirv_cross_c_sharedConfig.cmake
