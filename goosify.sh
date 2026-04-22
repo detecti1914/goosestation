@@ -417,62 +417,6 @@ if(NOT BUILD_LIBRETRO)
 .
 wq
 PATCHEND
-# Add: goosestation_libretro.info
-cat > 'goosestation_libretro.info' <<'PATCHEND'
-# Software Information
-display_name = "Sony - PlayStation (GooseStation)"
-authors = "stenzek"
-supported_extensions = "exe|psexe|cue|bin|img|iso|chd|pbp|ecm|mds|psf|m3u"
-corename = "GooseStation"
-categories = "Emulator"
-license = "CC-BY-NC-ND-4.0"
-permissions = ""
-
-# Hardware Information
-manufacturer = "Sony"
-systemname = "PlayStation"
-systemid = "playstation"
-
-# Libretro Features
-database = "Sony - PlayStation"
-display_version = "0.1"
-supports_no_game = "false"
-hw_render = "true"
-required_hw_api = "OpenGL Core >= 3.3 | Vulkan >= 1.0"
-is_experimental = "true"
-savestate = "true"
-savestate_features = "serialized"
-input_descriptors = "true"
-disk_control = "true"
-
-# BIOS / Firmware
-firmware_count = 7
-firmware0_desc = "psxonpsp660.bin (PSP PS1 BIOS)"
-firmware0_path = "psxonpsp660.bin"
-firmware0_opt = "true"
-firmware1_desc = "scph5500.bin (PS1 JP BIOS)"
-firmware1_path = "scph5500.bin"
-firmware1_opt = "true"
-firmware2_desc = "scph5501.bin (PS1 US BIOS)"
-firmware2_path = "scph5501.bin"
-firmware2_opt = "true"
-firmware3_desc = "scph5502.bin (PS1 EU BIOS)"
-firmware3_path = "scph5502.bin"
-firmware3_opt = "true"
-firmware4_desc = "ps1_rom.bin (PS3 PS1 BIOS)"
-firmware4_path = "ps1_rom.bin"
-firmware4_opt = "true"
-firmware5_desc = "PSX-XBOO.ROM (no$psx bios)"
-firmware5_path = "PSX-XBOO.ROM"
-firmware5_opt = "true"
-firmware6_desc = "PSX-XBOO.ROM-512K (no$psx bios 512K)"
-firmware6_path = "PSX-XBOO.ROM-512K"
-firmware6_opt = "true"
-
-notes = "(!) psxonpsp660.bin (md5): c53ca5908936d412331790f4426c6c33|(!) scph5500.bin (md5): 8dd7d5296a650fac7319bce665a6a53c|(!) scph5501.bin (md5): 490f666e1afb15b7362b406ed1cea246|(!) scph5502.bin (md5): 32736f17079d0b2b7024407c39bd3050|(!) ps1_rom.bin (md5): 81bbe60ba7a3d1cea1d48c14cbcc647b|(!) PSX-XBOO.ROM (md5): 6d2d7d64d5a6a9dfe86b514f10046313|(!) PSX-XBOO.ROM-512K (md5): fa20b6f2cf54b6825209d6b40ec91c15"
-
-description = "GooseStation is a Sony PlayStation libretro core based on goosified DuckStation. A BIOS ROM image is required."
-PATCHEND
 # Modify: src/CMakeLists.txt
 ed -s 'src/CMakeLists.txt' <<'PATCHEND'
 5s/^/  /
