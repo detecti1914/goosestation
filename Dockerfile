@@ -62,8 +62,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf llvm-ml-19 /usr/bin/llvm-ml
 
-# Android NDK r28b
-ENV ANDROID_NDK_VERSION=r28b
+# Android NDK r29
+ENV ANDROID_NDK_VERSION=r29
 ENV ANDROID_NDK=/opt/android-ndk
 RUN mkdir -p /opt && cd /tmp \
     && curl -fsSLO "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_VERSION}-linux.zip" \

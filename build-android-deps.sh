@@ -11,6 +11,8 @@ test -n "$NDK" || { echo "ERROR: set NDK=/path/to/android-ndk" >&2; exit 1; }
 test -d "$NDK" || { echo "ERROR: NDK not found at $NDK" >&2; exit 1; }
 TOOLCHAIN="$NDK/build/cmake/android.toolchain.cmake"
 test -f "$TOOLCHAIN" || { echo "ERROR: toolchain file not found: $TOOLCHAIN" >&2; exit 1; }
+NDK_HOST="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/$NDK_HOST/sysroot"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${BUILD_DIR:-$SCRIPT_DIR/build/android}"
@@ -19,6 +21,11 @@ SRC_DIR="$BUILD_DIR/deps-src"
 
 mkdir -p "$PREFIX" "$SRC_DIR"
 
+# cmake 4.x reads api-level.h from CMAKE_FIND_ROOT_PATH to detect the Android API
+# level. Seed it from the NDK sysroot so all dep builds find it immediately.
+mkdir -p "$PREFIX/include/android"
+cp "$NDK_SYSROOT/usr/include/android/api-level.h" "$PREFIX/include/android/api-level.h"
+
 CMAKE_COMMON=(
   -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"
   -DANDROID_ABI="$ANDROID_ABI"
@@ -26,7 +33,7 @@ CMAKE_COMMON=(
   -DCMAKE_BUILD_TYPE=Release
   -DCMAKE_INSTALL_PREFIX="$PREFIX"
   -DCMAKE_PREFIX_PATH="$PREFIX"
-  -DCMAKE_FIND_ROOT_PATH="$PREFIX"
+  -DCMAKE_FIND_ROOT_PATH="$PREFIX;$NDK_SYSROOT"
   -DBUILD_SHARED_LIBS=OFF
   -DBUILD_TESTING=OFF
 )
