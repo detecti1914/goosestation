@@ -155,3 +155,7 @@ cp "${SCRIPT_DIR}/goosestation_libretro.info" "${DIST_DIR}/goosestation_libretro
 echo ""
 echo "==> Done!"
 echo "  Artifact: ${DIST_DIR}/goosestation_libretro.so"
+
+termux-setup-storage
+cp -v dist/android/goosestation_libretro.so  ~/storage/shared/Download
+cp -v dist/android/goosestation_libretro.info  ~/storage/shared/Retroarch/info
