@@ -22,8 +22,8 @@ ANDROID_NDK ?= $(or \
 ANDROID_ABI ?= arm64-v8a
 ANDROID_PLATFORM ?= android-28
 
-# Cache linux extras (libjpeg-turbo cmake config, plutovg/plutosvg, cpuinfo —
-# things Debian doesn't package) under .cache/ alongside other targets.
+# Cache linux extras (cpuinfo — not packaged on Debian) under .cache/
+# alongside other targets.
 LINUX_BUILD_DIR := $(CACHE_DIR)/linux
 LINUX_DEPS_DIR := $(LINUX_BUILD_DIR)/deps
 
@@ -48,14 +48,14 @@ help:
 	@echo "  android-unstripped  same, keep debug symbols (.unstripped.so)"
 	@echo "  windows             build stripped libretro core for Windows x64 (mingw cross via LLVM)"
 	@echo "  windows-unstripped  same, keep debug symbols (.unstripped.dll)"
-	@echo "  all                 stripped linux + android"
+	@echo "  all                 stripped linux + android + windows"
 	@echo "  clean               remove build and dist dirs (keep fetched source)"
 	@echo "  distclean           remove everything, including fetched source"
 	@echo ""
 	@echo "Pinned:"
 	@echo "  DuckStation upstream: $(UPSTREAM_COMMIT)"
 
-all: linux android
+all: linux android windows
 
 prepare: $(SRC_DIR)/.goosified
 
@@ -113,7 +113,7 @@ $(LINUX_UNSTRIPPED): prepare $(LINUX_DEPS_DIR)/.deps-ready
 	@echo "  $@"
 
 $(LINUX_DEPS_DIR)/.deps-ready: $(ROOT)/build-linux-deps.sh
-	@echo "==> Building Linux extras (libjpeg-turbo, plutovg, plutosvg, cpuinfo) into $(LINUX_BUILD_DIR)..."
+	@echo "==> Building Linux extras into $(LINUX_BUILD_DIR)..."
 	@BUILD_DIR=$(LINUX_BUILD_DIR) bash $(ROOT)/build-linux-deps.sh
 	@touch $@
 
