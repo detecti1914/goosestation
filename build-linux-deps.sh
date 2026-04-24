@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the GooseStation linux libretro deps that aren't packaged on Debian:
-# libjpeg-turbo (no CMake config), plutovg, plutosvg, cpuinfo. Static, into
-# a private prefix that the linux Makefile target adds to CMAKE_PREFIX_PATH.
+# cpuinfo. Static, into a private prefix that the linux Makefile target adds
+# to CMAKE_PREFIX_PATH.
 set -euo pipefail
 
 JOBS="${JOBS:-$(nproc)}"
@@ -48,27 +48,6 @@ build_cmake() {
   cmake --build "$builddir" -j"$JOBS"
   cmake --install "$builddir"
 }
-
-PLUTOVG_DIR=$(fetch plutovg "https://github.com/sammycage/plutovg/archive/refs/tags/v1.0.0.tar.gz")
-build_cmake plutovg "$PLUTOVG_DIR" -DPLUTOVG_BUILD_EXAMPLES=OFF
-
-mkdir -p "$PREFIX/lib/pkgconfig"
-cat > "$PREFIX/lib/pkgconfig/plutovg.pc" <<EOF
-prefix=$PREFIX
-exec_prefix=\${prefix}
-libdir=\${prefix}/lib
-includedir=\${prefix}/include
-
-Name: PlutoVG
-Description: stub
-Version: 1.0.0
-Cflags: -I\${includedir}/plutovg -DPLUTOVG_BUILD_STATIC
-Libs: -L\${libdir} -lplutovg
-Libs.private: -lm
-EOF
-
-PLUTOSVG_DIR=$(fetch plutosvg "https://github.com/sammycage/plutosvg/archive/refs/tags/v0.0.7.tar.gz")
-build_cmake plutosvg "$PLUTOSVG_DIR" -DPLUTOSVG_BUILD_EXAMPLES=OFF
 
 if [ ! -d "$SRC_DIR/cpuinfo" ]; then
   git clone --depth 1 https://github.com/pytorch/cpuinfo.git "$SRC_DIR/cpuinfo"

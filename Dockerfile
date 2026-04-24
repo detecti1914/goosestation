@@ -45,8 +45,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpng-dev \
         libjpeg62-turbo-dev \
         libwebp-dev \
-        libfreetype-dev \
-        libzip-dev \
         libcurl4-openssl-dev \
         libsdl3-dev \
         libshaderc-dev \
