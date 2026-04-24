@@ -16,7 +16,7 @@ would use.
 ### Linux target
 Runtime/build libs (Arch/aur package names shown; adapt to your distro):
 
-    zstd libzip freetype libjpeg-turbo libpng libwebp plutosvg
+    zstd libjpeg-turbo libpng libwebp
     cpuinfo-pytorch-git zlib systemd-libs
     vulkan-headers shaderc spirv-cross
     libglvnd
@@ -38,7 +38,8 @@ Runtime/build libs (Arch/aur package names shown; adapt to your distro):
 
     make linux                              # host Linux .so
     make android                            # Android arm64 .so
-    make all                                # both
+    make windows                            # Windows x86_64 .dll (mingw cross)
+    make all                                # all three
     make clean                              # wipe build/ dist/
     make distclean                          # also wipe src/
 
