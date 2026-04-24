@@ -15085,6 +15085,7 @@ public:
 PATCHEND
 # Modify: src/util/opengl_context.cpp
 ed -s 'src/util/opengl_context.cpp' <<'PATCHEND'
+76,77s/^  //
 148d
 147a
 #elif defined(__ANDROID__) && !defined(__LIBRETRO__)
@@ -15098,12 +15099,39 @@ ed -s 'src/util/opengl_context.cpp' <<'PATCHEND'
   Error::SetStringView(error, "OpenGL context creation not used in libretro build");
 #elif defined(_WIN32) && !defined(_M_ARM64)
 .
+78,82d
+70,75d
+69a
+    // Framebuffer fetch is broken on all Adreno drivers (verified on 500, 800).
+    // Disable it unconditionally for Qualcomm.
+    VERBOSE_LOG("Disabling GL_EXT_shader_framebuffer_fetch on Adreno");
+.
+36a
+
+static void DisableBrokenExtensions(const char* gl_vendor, const char* gl_renderer, const char* gl_version);
+
+void OpenGLContext::EnableBrokenExtensionsWorkarounds()
+{
+  const char* gl_vendor = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
+  const char* gl_renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+  const char* gl_version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+  DisableBrokenExtensions(gl_vendor, gl_renderer, gl_version);
+}
+.
 25a
 #include "opengl_context_egl.h"
 .
 22d
 21a
 #elif defined(__ANDROID__) && !defined(__LIBRETRO__)
+.
+wq
+PATCHEND
+# Modify: src/util/opengl_context.h
+ed -s 'src/util/opengl_context.h' <<'PATCHEND'
+55a
+  static void EnableBrokenExtensionsWorkarounds();
+
 .
 wq
 PATCHEND
@@ -15175,6 +15203,10 @@ void OpenGLDevice::InvalidateCachedState()
       m_gl_context.reset();
       return false;
     }
+
+    // Disable broken extensions for vendor-specific issues.
+    // This is normally done in OpenGLContext::Create() but skipped for libretro external context.
+    OpenGLContext::EnableBrokenExtensionsWorkarounds();
   }
   else
 #endif
@@ -15386,6 +15418,9 @@ bool VulkanDevice::CreateDeviceFromExternal(VkPhysicalDevice physical_device, Vk
     return false;
   }
 
+  // Set driver type for external device
+  SetDriverType(VulkanLoader::GuessDriverType(m_device_properties, m_device_driver_properties));
+
   DynamicHeapArray<VkExtensionProperties> available_extensions(extension_count);
   vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &extension_count, available_extensions.data());
 
@@ -15396,6 +15431,17 @@ bool VulkanDevice::CreateDeviceFromExternal(VkPhysicalDevice physical_device, Vk
                                  false, nullptr);
 
   SetFeatures(create_flags, physical_device, enabled_features);
+  
+  // Apply Adreno-specific workarounds for external device (MUST be after SetFeatures to stick)
+// Disable feedback loops and dual-source blend on Adreno to match OpenGL path which never uses these features
+// (OpenGL always falls back to simpler blending that works correctly)
+if (m_driver_type == GPUDriverType::QualcommProprietary || m_driver_type == GPUDriverType::ARMProprietary)
+{
+  create_flags |= CreateFlags::DisableFeedbackLoops | CreateFlags::DisableFramebufferFetch | CreateFlags::DisableDualSourceBlend;
+  m_features.feedback_loops = false;
+  m_features.framebuffer_fetch = false;
+  m_features.dual_source_blend = false;
+}
 
   if (!CreateAllocator() || !CreatePersistentDescriptorPool() || !CreateCommandBuffers() || !CreatePipelineLayouts())
     return false;
