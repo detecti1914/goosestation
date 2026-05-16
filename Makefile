@@ -1,7 +1,7 @@
 # GooseStation libretro core builder.
 #
 
-UPSTREAM_COMMIT := 5e7be496a2d0480aaabbe9746a1a4576b469d301
+UPSTREAM_COMMIT := 54feef27dab1b105c30ad341e503c399ebb2409d
 
 UPSTREAM_URL := https://github.com/stenzek/duckstation/archive/$(UPSTREAM_COMMIT).tar.gz
 
@@ -14,17 +14,26 @@ SRC_DIR := $(SRC_ROOT)/duckstation-$(UPSTREAM_COMMIT)
 BUILD_ROOT := $(ROOT)/build
 DIST_DIR := $(ROOT)/dist
 
-ANDROID_NDK ?= $(or \
-		$(ANDROID_NDK_ROOT), \
-		$(ANDROID_NDK_HOME), \
-		$(shell ls -d $${ANDROID_HOME:-$${ANDROID_SDK_ROOT:-$$HOME/Android/Sdk}}/ndk/* 2>/dev/null | sort -V | tail -1), \
-		$(shell ls -d /opt/android-sdk/ndk/* 2>/dev/null | sort -V | tail -1))
+ANDROID_NDK_VERSION ?= r29
+NDK_HOST_ARCH := $(shell uname -m)
+# Containerized cross-build: cache archive under .cache/, extract per-run to
+# /tmp (avoids bind-mount symlink issues on macOS+podman). Re-extract is ~30s.
+# Native-host builds with system NDK aren't supported here — use Docker.
+ifeq ($(NDK_HOST_ARCH),$(filter $(NDK_HOST_ARCH),aarch64 arm64))
+ANDROID_NDK_ARCHIVE := $(CACHE_DIR)/android-ndk-$(ANDROID_NDK_VERSION)-linux-aarch64.tar.gz
+ANDROID_NDK_URL := https://github.com/SnowNF/ndk-aarch64-linux/releases/download/0.0.2/android-ndk-$(ANDROID_NDK_VERSION)-linux-aarch64.tar.gz
+else
+ANDROID_NDK_ARCHIVE := $(CACHE_DIR)/android-ndk-$(ANDROID_NDK_VERSION)-linux.zip
+ANDROID_NDK_URL := https://dl.google.com/android/repository/android-ndk-$(ANDROID_NDK_VERSION)-linux.zip
+endif
+ANDROID_NDK := /tmp/android-ndk-$(ANDROID_NDK_VERSION)
 ANDROID_ABI ?= arm64-v8a
 ANDROID_PLATFORM ?= android-28
 
 # Cache linux extras (cpuinfo — not packaged on Debian) under .cache/
 # alongside other targets.
-LINUX_BUILD_DIR := $(CACHE_DIR)/linux
+HOST_ARCH := $(shell uname -m)
+LINUX_BUILD_DIR := $(CACHE_DIR)/linux-$(HOST_ARCH)
 LINUX_DEPS_DIR := $(LINUX_BUILD_DIR)/deps
 
 MINGW_PREFIX ?= x86_64-w64-mingw32
@@ -32,13 +41,17 @@ MINGW_PREFIX ?= x86_64-w64-mingw32
 MINGW_BUILD_DIR := $(CACHE_DIR)/mingw
 MINGW_DEPS_DIR := $(MINGW_BUILD_DIR)/deps
 
+MACOS_BUILD_DIR := $(CACHE_DIR)/macos
+MACOS_DEPS_DIR := $(MACOS_BUILD_DIR)/deps
+
 CMAKE ?= cmake
 STRIP ?= strip
-ANDROID_STRIP = $(ANDROID_NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+ANDROID_PREBUILT = $(firstword $(wildcard $(ANDROID_NDK)/toolchains/llvm/prebuilt/linux-*))
+ANDROID_STRIP = $(ANDROID_PREBUILT)/bin/llvm-strip
 MINGW_STRIP = llvm-strip
-JOBS ?= $(shell nproc 2>/dev/null || echo 4)
+JOBS ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
-.PHONY: all linux linux-unstripped android android-unstripped windows windows-unstripped clean distclean prepare help
+.PHONY: all linux linux-unstripped android android-unstripped windows windows-unstripped macos macos-unstripped switch switch-retroarch clean distclean prepare help
 
 help:
 	@echo "Targets:"
@@ -48,6 +61,10 @@ help:
 	@echo "  android-unstripped  same, keep debug symbols (.unstripped.so)"
 	@echo "  windows             build stripped libretro core for Windows x64 (mingw cross via LLVM)"
 	@echo "  windows-unstripped  same, keep debug symbols (.unstripped.dll)"
+	@echo "  macos               build stripped libretro core for macOS (native, requires Homebrew deps)"
+	@echo "  macos-unstripped    same, keep debug symbols (.unstripped.dylib)"
+	@echo "  switch              build static libretro archive for Nintendo Switch (devkitA64)"
+	@echo "  switch-retroarch    build per-core RetroArch NRO with goosestation core baked in"
 	@echo "  all                 stripped linux + android + windows"
 	@echo "  clean               remove build and dist dirs (keep fetched source)"
 	@echo "  distclean           remove everything, including fetched source"
@@ -74,9 +91,10 @@ $(SRC_DIR)/.goosified: $(GOOSIFY) $(TARBALL)
 	@cd $(SRC_DIR) && bash ./goosify.sh
 	@touch $@
 
+LINUX_DIST_DIR := $(DIST_DIR)/linux-$(HOST_ARCH)
 LINUX_BUILT := $(BUILD_ROOT)/linux/src/goosestation-libretro/goosestation_libretro.so
-LINUX_UNSTRIPPED := $(DIST_DIR)/goosestation_libretro_linux.unstripped.so
-LINUX_SO := $(DIST_DIR)/goosestation_libretro_linux.so
+LINUX_UNSTRIPPED := $(LINUX_DIST_DIR)/goosestation_libretro.unstripped.so
+LINUX_SO := $(LINUX_DIST_DIR)/goosestation_libretro.so
 
 # Cache android deps under .cache/ so they survive `make clean` and `--rm` containers.
 ANDROID_BUILD_DIR := $(CACHE_DIR)/android
@@ -105,9 +123,9 @@ $(LINUX_UNSTRIPPED): prepare $(LINUX_DEPS_DIR)/.deps-ready
 		-Wno-dev
 	@echo "==> Building"
 	@$(CMAKE) --build $(BUILD_ROOT)/linux --parallel $(JOBS) --target goosestation_libretro
-	@mkdir -p $(DIST_DIR)
+	@mkdir -p $(LINUX_DIST_DIR)
 	@cp $(LINUX_BUILT) $@
-	@cp $(ROOT)/goosestation_libretro.info $(DIST_DIR)/goosestation_libretro.info
+	@cp $(ROOT)/goosestation_libretro.info $(LINUX_DIST_DIR)/goosestation_libretro.info
 	@echo ""
 	@echo "Linux core built (unstripped):"
 	@echo "  $@"
@@ -127,8 +145,7 @@ $(LINUX_SO): $(LINUX_UNSTRIPPED)
 android: $(ANDROID_SO)
 android-unstripped: $(ANDROID_UNSTRIPPED)
 
-$(ANDROID_UNSTRIPPED): prepare $(ANDROID_DEPS_DIR)/.deps-ready
-	@test -d "$(ANDROID_NDK)" || { echo "ERROR: ANDROID_NDK not found at $(ANDROID_NDK). Set ANDROID_NDK=/path/to/ndk"; exit 1; }
+$(ANDROID_UNSTRIPPED): prepare $(ANDROID_DEPS_DIR)/.deps-ready $(ANDROID_NDK)/.gs-ready
 	@echo "==> Configuring Android build"
 	@$(CMAKE) -S $(SRC_DIR) -B $(BUILD_ROOT)/android \
 		-DCMAKE_TOOLCHAIN_FILE=$(ANDROID_NDK)/build/cmake/android.toolchain.cmake \
@@ -160,10 +177,23 @@ $(ANDROID_SO): $(ANDROID_UNSTRIPPED)
 	@echo "Android core built (stripped):"
 	@echo "  $@"
 
-$(ANDROID_DEPS_DIR)/.deps-ready: $(ROOT)/build-android-deps.sh
-	@test -d "$(ANDROID_NDK)" || { echo "ERROR: ANDROID_NDK not found at $(ANDROID_NDK). Set ANDROID_NDK=/path/to/ndk"; exit 1; }
+$(ANDROID_DEPS_DIR)/.deps-ready: $(ROOT)/build-android-deps.sh $(ANDROID_NDK)/.gs-ready
 	@echo "==> Building Android dependencies (cached at $(ANDROID_BUILD_DIR))..."
 	@NDK=$(ANDROID_NDK) ANDROID_ABI=$(ANDROID_ABI) BUILD_DIR=$(ANDROID_BUILD_DIR) bash $(ROOT)/build-android-deps.sh
+	@touch $@
+
+$(ANDROID_NDK_ARCHIVE):
+	@mkdir -p $(CACHE_DIR)
+	@echo "==> Fetching NDK archive..."
+	@curl -fsSL $(ANDROID_NDK_URL) -o $@.tmp && mv $@.tmp $@
+
+$(ANDROID_NDK)/.gs-ready: $(ANDROID_NDK_ARCHIVE)
+	@echo "==> Extracting NDK to $(ANDROID_NDK)..."
+	@rm -rf $(ANDROID_NDK)
+	@case "$(ANDROID_NDK_ARCHIVE)" in \
+		*.zip) unzip -q $< -d /tmp ;; \
+		*.tar.gz) mkdir -p $(ANDROID_NDK) && tar -xf $< -C $(ANDROID_NDK) --strip-components=1 ;; \
+	esac
 	@touch $@
 
 WINDOWS_BUILT := $(BUILD_ROOT)/windows/bin/goosestation_libretro.dll
@@ -230,8 +260,130 @@ $(MINGW_DEPS_DIR)/.deps-ready: $(ROOT)/build-mingw-deps.sh
 		BUILD_DIR=$(MINGW_BUILD_DIR) bash $(ROOT)/build-mingw-deps.sh
 	@touch $@
 
+MACOS_DIST_DIR := $(DIST_DIR)/macos-$(HOST_ARCH)
+MACOS_BUILT := $(BUILD_ROOT)/macos/src/goosestation-libretro/goosestation_libretro.dylib
+MACOS_UNSTRIPPED := $(MACOS_DIST_DIR)/goosestation_libretro.unstripped.dylib
+MACOS_DYLIB := $(MACOS_DIST_DIR)/goosestation_libretro.dylib
+
+macos: $(MACOS_DYLIB)
+macos-unstripped: $(MACOS_UNSTRIPPED)
+
+$(MACOS_UNSTRIPPED): prepare $(MACOS_DEPS_DIR)/.deps-ready
+	@echo "==> Configuring macOS build"
+	@$(CMAKE) -S $(SRC_DIR) -B $(BUILD_ROOT)/macos \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DBUILD_LIBRETRO=ON \
+		-DBUILD_REGTEST=OFF \
+		-DBUILD_TESTS=OFF \
+		-DENABLE_OPENGL=ON \
+		-DENABLE_VULKAN=ON \
+		-DCMAKE_MODULE_PATH=$(SRC_DIR)/cmake \
+		-DCMAKE_PREFIX_PATH="$(MACOS_DEPS_DIR);$(SRC_DIR)/cmake" \
+		-DCMAKE_CXX_FLAGS="-Wno-invalid-offsetof" \
+		-Wno-dev
+	@echo "==> Building"
+	@$(CMAKE) --build $(BUILD_ROOT)/macos --parallel $(JOBS) --target goosestation_libretro
+	@mkdir -p $(MACOS_DIST_DIR)
+	@cp $(MACOS_BUILT) $@
+	@cp $(ROOT)/goosestation_libretro.info $(MACOS_DIST_DIR)/goosestation_libretro.info
+	@echo ""
+	@echo "macOS core built (unstripped):"
+	@echo "  $@"
+
+$(MACOS_DEPS_DIR)/.deps-ready: $(ROOT)/build-macos-deps.sh
+	@echo "==> Building macOS extras into $(MACOS_BUILD_DIR)..."
+	@BUILD_DIR=$(MACOS_BUILD_DIR) bash $(ROOT)/build-macos-deps.sh
+	@touch $@
+
+$(MACOS_DYLIB): $(MACOS_UNSTRIPPED)
+	@cp $< $@
+	@$(STRIP) -x $@
+	@echo ""
+	@echo "macOS core built (stripped):"
+	@echo "  $@"
+
+SWITCH_DIST_DIR := $(DIST_DIR)/switch
+SWITCH_BUILT := $(BUILD_ROOT)/switch/src/goosestation-libretro/goosestation_libretro.a
+SWITCH_LIB := $(SWITCH_DIST_DIR)/libgoosestation_libretro.a
+DEVKITPRO ?= /opt/devkitpro
+
+switch: $(SWITCH_LIB)
+
+$(SWITCH_LIB): prepare
+	@test -f $(DEVKITPRO)/cmake/Switch.cmake || { echo "ERROR: $(DEVKITPRO)/cmake/Switch.cmake not found — run inside goosestation-builder-switch image"; exit 1; }
+	@echo "==> Configuring Switch build"
+	@$(CMAKE) -S $(SRC_DIR) -B $(BUILD_ROOT)/switch \
+		-DCMAKE_TOOLCHAIN_FILE=$(DEVKITPRO)/cmake/Switch.cmake \
+		-DCMAKE_C_COMPILER_LAUNCHER=ccache \
+		-DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DBUILD_LIBRETRO=ON \
+		-DBUILD_REGTEST=OFF \
+		-DBUILD_TESTS=OFF \
+		-DENABLE_OPENGL=ON \
+		-DENABLE_VULKAN=OFF \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DCMAKE_MODULE_PATH=$(SRC_DIR)/cmake \
+		-DCMAKE_CXX_FLAGS="-Wno-invalid-offsetof -flax-vector-conversions" \
+		-DSHADERC_INCLUDE_DIR=/opt/shader-headers \
+		-DSPIRV_CROSS_INCLUDE_DIR=/opt/shader-headers/spirv_cross \
+		-Wno-dev
+	@echo "==> Building"
+	@$(CMAKE) --build $(BUILD_ROOT)/switch --parallel $(JOBS) --target goosestation_libretro
+	@mkdir -p $(SWITCH_DIST_DIR)
+	@echo "==> Bundling dependency archives into single static lib"
+	@{ \
+		echo "create $@.tmp"; \
+		for a in $$(find $(BUILD_ROOT)/switch -name '*.a' ! -name 'libgoosestation_libretro_combined.a'); do \
+			echo "addlib $$a"; \
+		done; \
+		echo "save"; echo "end"; \
+	} | $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-ar -M
+	@mv $@.tmp $@
+	@cp $(ROOT)/goosestation_libretro.info $(SWITCH_DIST_DIR)/goosestation_libretro.info
+	@echo ""
+	@echo "Switch core built (static archive):"
+	@echo "  $@"
+
+RETROARCH_DIR    := $(CACHE_DIR)/RetroArch
+RETROARCH_PATCHES := $(ROOT)/patches/retroarch
+SWITCH_RA_NRO    := $(SWITCH_DIST_DIR)/goosestation_libretro_libnx.nro
+
+switch-retroarch: $(SWITCH_RA_NRO)
+
+$(SWITCH_RA_NRO): $(SWITCH_LIB)
+	@test -f $(DEVKITPRO)/cmake/Switch.cmake || { echo "ERROR: $(DEVKITPRO)/cmake/Switch.cmake not found — run inside goosestation-builder-switch image"; exit 1; }
+	@test -d $(RETROARCH_DIR) || { echo "ERROR: $(RETROARCH_DIR) missing — run update-build.sh switch to seed and patch it"; exit 1; }
+	@echo "==> Staging core archive as libretro_libnx.a"
+	@cp $(SWITCH_LIB) $(RETROARCH_DIR)/libretro_libnx.a
+	@# Force ELF relink: clock skew on bind-mounted .cache/ confuses make's
+	@# mtime check, so it skips relink even when libretro_libnx.a changes.
+	@# Also force dynamic_dummy.o recompile: CFLAGS changes (HAVE_STATIC_DUMMY=)
+	@# are invisible to make's mtime-based dependency tracking.
+	@rm -f $(RETROARCH_DIR)/retroarch_switch.elf $(RETROARCH_DIR)/retroarch_switch.nro \
+	       $(RETROARCH_DIR)/cores/dynamic_dummy.o
+	@# Goose-specific overrides are committed on goose/switch-bundle in the
+	@# RetroArch tree (libs, goose_excpt.o in OFILES, 7zCrc ODR fix).
+	@# The only runtime step is copying goose_excpt.o from the cmake build
+	@# tree — it's a build artifact so it can't be a committed file.
+	@# page_fault_handler.cpp overrides libnx's weak __libnx_exception_entry;
+	@# copying it as a loose .o ensures the strong symbol wins at link time
+	@# even in interpreter-only builds where the archive member isn't pulled.
+	@HANDLER_OBJ=$$(find $(BUILD_ROOT)/switch -name 'page_fault_handler*' -name '*.o' -print -quit); \
+	 test -n "$$HANDLER_OBJ" || { echo "ERROR: could not find page_fault_handler object in build tree"; exit 1; }; \
+	 cp "$$HANDLER_OBJ" $(RETROARCH_DIR)/goose_excpt.o
+	@echo "==> Building RetroArch NRO (Makefile.libnx)"
+	@$(MAKE) -C $(RETROARCH_DIR) -f Makefile.libnx -j$(JOBS) HAVE_STATIC_DUMMY=
+	@mkdir -p $(SWITCH_DIST_DIR)
+	@cp $(RETROARCH_DIR)/retroarch_switch.nro $@
+	@cp $(RETROARCH_DIR)/retroarch_switch.elf $(SWITCH_DIST_DIR)/retroarch_switch.elf
+	@echo ""
+	@echo "Switch RetroArch NRO built (per-core, static):"
+	@echo "  $@"
+
 clean:
 	rm -rf $(BUILD_ROOT) $(DIST_DIR)
+
 
 distclean: clean
 	rm -rf $(SRC_ROOT) $(CACHE_DIR)
