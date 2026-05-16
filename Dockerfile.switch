@@ -1,0 +1,109 @@
+### GooseStation libretro core builder — Nintendo Switch (devkitA64/libnx)
+###
+### Usage:
+###   docker build -f Dockerfile.switch -t goosestation-builder-switch .
+###   docker run --rm -v "$PWD/dist:/work/dist:Z" -v "$PWD/.cache:/work/.cache:Z" \
+###       goosestation-builder-switch switch
+###
+### Base: devkitPro's devkitA64 image (pacman + switch-dev preinstalled).
+### Adds switch-portlibs (zlib/png/freetype/etc), cmake/ninja, host clang for
+### codegen tools that run on the build host.
+
+# syntax=docker/dockerfile:1.6
+FROM devkitpro/devkita64:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+ENV CCACHE_DIR=/work/.cache/ccache
+ENV CCACHE_MAXSIZE=5G
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && echo 'Acquire::Check-Valid-Until "false";\nAcquire::Check-Date "false";' > /etc/apt/apt.conf.d/99no-check-valid-until \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends eatmydata \
+    && eatmydata apt-get install -y --no-install-recommends \
+        ccache \
+        cmake \
+        ninja-build \
+        git \
+        curl \
+        ca-certificates \
+        clang \
+        lld \
+        python3 \
+        pkg-config \
+        make \
+        file \
+        xz-utils \
+        ed \
+        libshaderc-dev \
+        libspirv-cross-c-shared-dev
+
+# UAM: runtime GLSL→DKSH compiler for deko3d.
+# RSDuck fork (library-target branch) provides uam.h + libuam.a.
+# meson+bison+flex+mako: UAM build deps (apt layer is cached without them).
+RUN apt-get update && eatmydata apt-get install -y --no-install-recommends meson python3-mako bison flex
+ARG UAM_COMMIT=6599d8e32a735baec09dc5a4549622cb82bd829a
+# Script: rename UAM-defined symbols to avoid RA mesa collision.
+COPY uam_redef.sh /tmp/uam_redef.sh
+RUN git clone https://github.com/RSDuck/uam.git /tmp/uam \
+    && cd /tmp/uam \
+    && git checkout ${UAM_COMMIT} \
+    && echo "option('build_as_library', type: 'boolean', value: false, description: 'Build uam as a static library instead of an executable')" > meson_options.txt \
+    && meson setup build --cross-file crossfile \
+        --prefix=$DEVKITPRO/portlibs/switch \
+        --buildtype=release \
+        -Dbuild_as_library=true \
+        -Dcpp_args=-fno-omit-frame-pointer \
+        -Dc_args=-fno-omit-frame-pointer \
+    && ninja -C build \
+    && test -f build/libuam.a \
+    && mkdir -p $DEVKITPRO/portlibs/switch/include $DEVKITPRO/portlibs/switch/lib \
+    && cp source/uam.h $DEVKITPRO/portlibs/switch/include/ \
+    && cd build \
+    && $DEVKITPRO/devkitA64/bin/aarch64-none-elf-ar -t libuam.a > /tmp/uam_members.txt \
+    && $DEVKITPRO/devkitA64/bin/aarch64-none-elf-ar rcs libuam_fat.a $(cat /tmp/uam_members.txt) \
+    && bash /tmp/uam_redef.sh libuam_fat.a /tmp/uam_redef $DEVKITPRO/portlibs/switch/lib/libuam.a \
+    && cd / \
+    && rm -rf /tmp/uam
+
+# Prepend symbol-redirect macros to uam.h (objcopy --redefine-syms renamed
+# uam_init→__uam_uam_init etc; macros let callers use the original names).
+COPY uam_prefix.h /tmp/uam_prefix.h
+RUN cat /tmp/uam_prefix.h $DEVKITPRO/portlibs/switch/include/uam.h \
+        > /tmp/uam_combined.h \
+    && mv /tmp/uam_combined.h $DEVKITPRO/portlibs/switch/include/uam.h \
+    && rm /tmp/uam_prefix.h
+
+# switch-portlibs: zlib, libpng, libwebp, freetype, libzip, mbedtls, etc.
+RUN --mount=type=cache,target=/opt/devkitpro/pacman/cache,sharing=locked \
+    dkp-pacman -Syu --noconfirm \
+    && dkp-pacman -S --noconfirm --needed switch-portlibs switch-mesa switch-ffmpeg
+
+# cpuinfo isn't in portlibs — build static archive from source.
+RUN git clone --depth 1 https://github.com/pytorch/cpuinfo.git /tmp/cpuinfo \
+    && cmake -S /tmp/cpuinfo -B /tmp/cpuinfo/build \
+        -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake \
+        -DCMAKE_INSTALL_PREFIX=$DEVKITPRO/portlibs/switch \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCPUINFO_BUILD_TOOLS=OFF \
+        -DCPUINFO_BUILD_UNIT_TESTS=OFF \
+        -DCPUINFO_BUILD_MOCK_TESTS=OFF \
+        -DCPUINFO_BUILD_BENCHMARKS=OFF \
+        -DCPUINFO_LIBRARY_TYPE=static \
+    && cmake --build /tmp/cpuinfo/build --parallel \
+    && cmake --install /tmp/cpuinfo/build \
+    && rm -rf /tmp/cpuinfo
+
+# Stage shaderc/spirv-cross headers in a dedicated dir so the cross compiler
+# doesn't pick up host glibc headers when we add this include path.
+RUN mkdir -p /opt/shader-headers \
+    && cp -r /usr/include/shaderc /opt/shader-headers/ \
+    && cp -r /usr/include/spirv_cross /opt/shader-headers/
+
+WORKDIR /work
+COPY . /work
+
+ENTRYPOINT ["make"]
