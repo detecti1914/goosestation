@@ -11,7 +11,11 @@ test -n "$NDK" || { echo "ERROR: set NDK=/path/to/android-ndk" >&2; exit 1; }
 test -d "$NDK" || { echo "ERROR: NDK not found at $NDK" >&2; exit 1; }
 TOOLCHAIN="$NDK/build/cmake/android.toolchain.cmake"
 test -f "$TOOLCHAIN" || { echo "ERROR: toolchain file not found: $TOOLCHAIN" >&2; exit 1; }
-NDK_HOST="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+# NDK ships toolchain prebuilts under a single host dir. Stock Google NDK uses
+# linux-x86_64; SnowNF aarch64 NDK keeps the same name with native binaries.
+# Detect rather than guess from uname.
+NDK_HOST="$(ls "$NDK/toolchains/llvm/prebuilt/" | head -1)"
+test -n "$NDK_HOST" || { echo "ERROR: no toolchain prebuilt found in $NDK/toolchains/llvm/prebuilt/" >&2; exit 1; }
 NDK_SYSROOT="$NDK/toolchains/llvm/prebuilt/$NDK_HOST/sysroot"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

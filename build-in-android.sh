@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-UPSTREAM_COMMIT="5e7be496a2d0480aaabbe9746a1a4576b469d301"
+UPSTREAM_COMMIT="54feef27dab1b105c30ad341e503c399ebb2409d"
 UPSTREAM_URL="https://github.com/stenzek/duckstation/archive/${UPSTREAM_COMMIT}.tar.gz"
 
 CACHE_DIR="${SCRIPT_DIR}/.cache"
@@ -19,7 +19,8 @@ ANDROID_API="${ANDROID_API:-28}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
 # lzhiyong/termux-ndk provides aarch64 prebuilt tools required to run on arm64 Android.
-NDK_DIR="${TERMUX_NDK_DIR:-${HOME}/android/android-ndk-r29}"
+# Distinct from the SnowNF/Google NDK used by Docker/Linux builds — keep separate cache path.
+NDK_DIR="${TERMUX_NDK_DIR:-${CACHE_DIR}/android-ndk-r29-aarch64-termux}"
 NDK_ARCHIVE="${CACHE_DIR}/android-ndk-r29-aarch64.7z"
 NDK_DOWNLOAD_URL="https://github.com/lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-r29-aarch64.7z"
 
@@ -35,13 +36,19 @@ pkg install -y cmake clang lld llvm binutils make git curl python p7zip ed xz-ut
 
 if [ ! -d "$NDK_DIR" ] && [ "${SKIP_NDK_DOWNLOAD:-0}" != "1" ]; then
     echo "==> NDK not found at $NDK_DIR — downloading from lzhiyong/termux-ndk..."
-    mkdir -p "$CACHE_DIR" "${HOME}/android"
+    mkdir -p "$CACHE_DIR"
     if [ ! -f "$NDK_ARCHIVE" ]; then
         curl -fL --progress-bar -o "${NDK_ARCHIVE}.tmp" "$NDK_DOWNLOAD_URL"
         mv "${NDK_ARCHIVE}.tmp" "$NDK_ARCHIVE"
     fi
     echo "==> Extracting NDK (~333 MB, may take a minute)..."
-    7z x "$NDK_ARCHIVE" -o"${HOME}/android" -y
+    7z x "$NDK_ARCHIVE" -o"${CACHE_DIR}" -y
+    # Normalize archive top-dir to $NDK_DIR (lzhiyong archive root varies).
+    for cand in android-ndk-r29 android-ndk-r29-aarch64; do
+        if [ -d "${CACHE_DIR}/${cand}" ] && [ ! -d "$NDK_DIR" ]; then
+            mv "${CACHE_DIR}/${cand}" "$NDK_DIR"
+        fi
+    done
 elif [ ! -d "$NDK_DIR" ]; then
     echo "ERROR: NDK not found at $NDK_DIR and SKIP_NDK_DOWNLOAD=1" >&2
     exit 1
