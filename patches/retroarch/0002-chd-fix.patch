@@ -1,0 +1,12 @@
+diff --git a/Makefile.common b/Makefile.common
+index a3b34d3690..212419768a 100644
+--- a/Makefile.common
++++ b/Makefile.common
+@@ -2123,6 +2123,7 @@ ifeq ($(HAVE_ZLIB_COMMON), 1)
+          DEFINES += -Dchd_get_metadata=retroarch_internal_chd_get_metadata
+          DEFINES += -Dchd_codec_config=retroarch_internal_chd_codec_config
+          DEFINES += -Dchd_get_codec_name=retroarch_internal_chd_get_codec_name
++         DEFINES += -Dchd_open_core_file=retroarch_internal_chd_open_core_file
+ 
+          DEFINES += -Dcreate_huffman_decoder=retroarch_internal_create_huffman_decoder
+          DEFINES += -Ddelete_huffman_decoder=retroarch_internal_delete_huffman_decoder

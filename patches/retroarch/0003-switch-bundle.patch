@@ -1,0 +1,34 @@
+diff --git a/Makefile.common b/Makefile.common
+index ccbe1bbe93..350bb40346 100644
+--- a/Makefile.common
++++ b/Makefile.common
+@@ -1991,8 +1991,6 @@ ifeq ($(HAVE_7ZIP),1)
+    DEFINES += -DHAVE_7ZIP -D_7ZIP_ST
+    7ZOBJ = $(DEPS_DIR)/7zip/7zArcIn.o \
+            $(DEPS_DIR)/7zip/7zBuf.o \
+-           $(DEPS_DIR)/7zip/7zCrc.o \
+-           $(DEPS_DIR)/7zip/7zCrcOpt.o \
+            $(DEPS_DIR)/7zip/7zDec.o \
+            $(DEPS_DIR)/7zip/CpuArch.o \
+            $(DEPS_DIR)/7zip/Delta.o \
+diff --git a/Makefile.libnx b/Makefile.libnx
+index e35310bd1d..8ac6c9c9cb 100644
+--- a/Makefile.libnx
++++ b/Makefile.libnx
+@@ -151,7 +151,7 @@ LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,--allow-multiple-de
+ # add things from Makefile.common
+ CFLAGS += $(DEF_FLAGS)
+ 
+-LIBS := -lswresample -lavformat -lavcodec -lavutil -lswscale -lstdc++ -lbz2 -lpng -lz -lnx -lvpx -lopus -llzma -lmbedtls -lmbedx509 -lmbedcrypto -lnx -lm
++LIBS := -lswresample -lavformat -lavcodec -lavutil -lswscale -lstdc++ -lbz2 -lpng -lz -lzstd -ljpeg -lwebp -lcpuinfo -luam -lnx -lvpx -lopus -llzma -lmbedtls -lmbedx509 -lmbedcrypto -lnx -lm
+ 
+ ifeq ($(HAVE_OPENGL), 1)
+   LIBS := -lEGL -lglapi -ldrm_nouveau $(LIBS)
+@@ -206,6 +206,7 @@ endif
+ export OFILES 	:=	$(OBJ)
+ 
+ ifeq ($(strip $(HAVE_STATIC_DUMMY)),)
++  OFILES += goose_excpt.o
+   OFILES += libretro_libnx.a
+ endif
+ 
