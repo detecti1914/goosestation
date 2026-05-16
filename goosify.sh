@@ -20019,7 +20019,7 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
 #endif
 .
 1482a
-#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__))
+#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32))
   // Nothing to do — statically linked.
 #else
 .
@@ -20028,8 +20028,8 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
 .
 1449a
 
-#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__))
-  // Android libretro builds link spirv-cross statically — assign function pointers directly.
+#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32))
+  // Android/Apple/Windows libretro builds link spirv-cross statically — assign function pointers directly.
   static bool s_spirv_cross_initialized = false;
   if (s_spirv_cross_initialized)
     return true;
@@ -20051,7 +20051,7 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
   DYN_SHADERC_OPTIONAL_FUNCTIONS(UNLOAD_FUNC)
 .
 1427a
-#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__))
+#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32))
   if (g_shaderc_compiler)
   {
     ::shaderc_compiler_release(g_shaderc_compiler);
@@ -20076,8 +20076,8 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
 .
 1393a
 
-#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__))
-  // Android libretro builds link shaderc statically — assign function pointers directly.
+#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32))
+  // Android/Apple/Windows libretro builds link shaderc statically — assign function pointers directly.
   if (g_shaderc_compiler)
     return true;
 
