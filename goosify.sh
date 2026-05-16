@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# Patch: latest → HEAD
+# Patch: latest → WORKING
 # M = smart ed (indent→s, del→d, add→a), A = copy file, D = rm
 set -e
 echo 'GOOSIFYING...'
 
+# Modify: .gitignore
+ed -s '.gitignore' <<'PATCHEND'
+51a
+.claude/
+.clangd
+.
+wq
+PATCHEND
 # Rewrite: CMakeLists.txt
 rm -f 'CMakeLists.txt'
 cat > 'CMakeLists.txt' <<'PATCHEND'
@@ -83,6 +91,15 @@ ed -s 'CMakeModules/DuckStationUtils.cmake' <<'PATCHEND'
 	elseif(ANDROID)
 		message(STATUS "Building for Android.")
 .
+22d
+21a
+	if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" OR CMAKE_SYSTEM_NAME STREQUAL "Switch")
+		set(SWITCH TRUE PARENT_SCOPE)
+		set(SWITCH TRUE)
+		add_definitions(-D__SWITCH__)
+		message(STATUS "Building for Nintendo Switch.")
+	elseif(WIN32)
+.
 wq
 PATCHEND
 mkdir -p 'CMakeModules'
@@ -128,16 +145,16 @@ PATCHEND
 mkdir -p 'CMakeModules'
 # Add: CMakeModules/GooseLibretroLinking.cmake
 cat > 'CMakeModules/GooseLibretroLinking.cmake' <<'PATCHEND'
-# Static-link shaderc and spirv-cross into libretro cores on Android and on
-# Windows mingw. dlopen is impractical on Android (RetroArch loads cores with
-# RTLD_LOCAL, Play Store sandbox makes shipping extra .so files awkward); on
-# Windows nobody installs shaderc/spirv-cross system-wide, so the same logic
-# applies — bake them into the .dll.
+# Static-link shaderc and spirv-cross into libretro cores on Android, macOS,
+# and Windows mingw. dlopen is impractical on Android (RetroArch loads cores
+# with RTLD_LOCAL, Play Store sandbox makes shipping extra .so files awkward);
+# on macOS/Windows nobody installs shaderc/spirv-cross system-wide, so the
+# same logic applies — bake them into the .dylib/.dll.
 
 if(NOT BUILD_LIBRETRO)
   return()
 endif()
-if(NOT (ANDROID OR (WIN32 AND NOT MSVC)))
+if(NOT (ANDROID OR (WIN32 AND NOT MSVC) OR APPLE))
   return()
 endif()
 
@@ -185,6 +202,20 @@ find_package(zstd REQUIRED)
 find_package(WebP REQUIRED)
 find_package(libjpeg-turbo REQUIRED)
 find_package(cpuinfo REQUIRED)
+
+# Switch portlibs ship only static targets (zstd::libzstd_static,
+# libjpeg-turbo::jpeg-static). Wrap them so the rest of the codebase, which
+# wires zstd::libzstd_shared / libjpeg-turbo::jpeg, links transparently.
+if(SWITCH)
+  if(TARGET zstd::libzstd_static AND NOT TARGET zstd::libzstd_shared)
+    add_library(zstd::libzstd_shared INTERFACE IMPORTED)
+    target_link_libraries(zstd::libzstd_shared INTERFACE zstd::libzstd_static)
+  endif()
+  if(TARGET libjpeg-turbo::jpeg-static AND NOT TARGET libjpeg-turbo::jpeg)
+    add_library(libjpeg-turbo::jpeg INTERFACE IMPORTED)
+    target_link_libraries(libjpeg-turbo::jpeg INTERFACE libjpeg-turbo::jpeg-static)
+  endif()
+endif()
 
 if(ENABLE_VULKAN)
   if(NOT ANDROID)
@@ -417,6 +448,207 @@ if(NOT BUILD_LIBRETRO)
 .
 wq
 PATCHEND
+# Modify: dep/glad/include/EGL/eglplatform.h
+ed -s 'dep/glad/include/EGL/eglplatform.h' <<'PATCHEND'
+147a
+#elif defined(__SWITCH__)
+#include <switch.h>
+typedef void* EGLNativeDisplayType;
+typedef void* EGLNativePixmapType;
+typedef NWindow* EGLNativeWindowType;
+
+.
+wq
+PATCHEND
+# Modify: dep/vixl/include/vixl/code-buffer-vixl.h
+ed -s 'dep/vixl/include/vixl/code-buffer-vixl.h' <<'PATCHEND'
+151a
+  // Address used by emitted code for PC-relative calculations.
+  byte* address_;
+.
+68a
+    VIXL_STATIC_ASSERT(sizeof(T) >= sizeof(uintptr_t));
+    VIXL_ASSERT((offset >= 0) && (offset <= (cursor_ - buffer_)));
+    return reinterpret_cast<T>(address_ + offset);
+  }
+
+  template <typename T>
+  T GetOffsetWriteAddress(ptrdiff_t offset) const {
+.
+44a
+  void Reset(byte* buffer, byte* address, size_t capacity);
+.
+wq
+PATCHEND
+# Modify: dep/vixl/src/aarch64/assembler-aarch64.cc
+ed -s 'dep/vixl/src/aarch64/assembler-aarch64.cc' <<'PATCHEND'
+128d
+127a
+      PatchImmLLiteral(writable_ldr, logical_ldr, target);
+.
+120d
+119a
+      Instruction* logical_ldr = GetBuffer()->GetOffsetAddress<Instruction*>(offset);
+      Instruction* writable_ldr = GetBuffer()->GetOffsetWriteAddress<Instruction*>(offset);
+      const Instruction* ldr = writable_ldr;
+.
+70d
+69a
+    Instruction* writable_link =
+        GetBuffer()->GetOffsetWriteAddress<Instruction*>(*it.Current());
+    PatchImmPCOffsetTarget(writable_link, logical_link, GetLabelAddress<Instruction*>(label));
+.
+68d
+67a
+    Instruction* logical_link =
+.
+36a
+namespace {
+void PatchImmPCOffsetTarget(Instruction* writable, const Instruction* logical, const Instruction* target) {
+  if (writable->IsPCRelAddressing()) {
+    ptrdiff_t imm21;
+    if ((writable->Mask(PCRelAddressingMask) == ADR)) {
+      imm21 = target - logical;
+    } else {
+      VIXL_ASSERT(writable->Mask(PCRelAddressingMask) == ADRP);
+      uintptr_t logical_page = reinterpret_cast<uintptr_t>(logical) / kPageSize;
+      uintptr_t target_page = reinterpret_cast<uintptr_t>(target) / kPageSize;
+      imm21 = target_page - logical_page;
+    }
+
+    Instr imm = Assembler::ImmPCRelAddress(static_cast<int32_t>(imm21));
+    writable->SetInstructionBits(writable->Mask(~ImmPCRel_mask) | imm);
+    return;
+  }
+
+  VIXL_ASSERT(((target - logical) & 3) == 0);
+  Instr branch_imm = 0;
+  uint32_t imm_mask = 0;
+  int offset = static_cast<int>((target - logical) >> kInstructionSizeLog2);
+  switch (writable->GetBranchType()) {
+    case CondBranchType:
+      branch_imm = Assembler::ImmCondBranch(offset);
+      imm_mask = ImmCondBranch_mask;
+      break;
+    case UncondBranchType:
+      branch_imm = Assembler::ImmUncondBranch(offset);
+      imm_mask = ImmUncondBranch_mask;
+      break;
+    case CompareBranchType:
+      branch_imm = Assembler::ImmCmpBranch(offset);
+      imm_mask = ImmCmpBranch_mask;
+      break;
+    case TestBranchType:
+      branch_imm = Assembler::ImmTestBranch(offset);
+      imm_mask = ImmTestBranch_mask;
+      break;
+    default:
+      VIXL_UNREACHABLE();
+  }
+  writable->SetInstructionBits(writable->Mask(~imm_mask) | branch_imm);
+}
+
+void PatchImmLLiteral(Instruction* writable, const Instruction* logical, const Instruction* source) {
+  VIXL_ASSERT(IsWordAligned(source));
+  ptrdiff_t offset = (source - logical) >> kLiteralEntrySizeLog2;
+  Instr imm = Assembler::ImmLLiteral(static_cast<int>(offset));
+  writable->SetInstructionBits(writable->Mask(~ImmLLiteral_mask) | imm);
+}
+}  // namespace
+
+.
+wq
+PATCHEND
+# Modify: dep/vixl/src/aarch64/macro-assembler-aarch64.cc
+ed -s 'dep/vixl/src/aarch64/macro-assembler-aarch64.cc' <<'PATCHEND'
+294d
+293a
+      PatchImmPCOffsetTarget(writable_branch, logical_branch, veneer);
+.
+288d
+287a
+      Instruction* logical_branch =
+          masm_->GetBuffer()->GetOffsetAddress<Instruction*>(branch_pos);
+      Instruction* writable_branch =
+          masm_->GetBuffer()->GetOffsetWriteAddress<Instruction*>(branch_pos);
+.
+225d
+224a
+      Instruction* link =
+          masm_->GetBuffer()->GetOffsetWriteAddress<Instruction*>(link_offset);
+.
+32a
+
+namespace {
+void PatchImmPCOffsetTarget(Instruction* writable, const Instruction* logical, const Instruction* target) {
+  if (writable->IsPCRelAddressing()) {
+    ptrdiff_t imm21;
+    if ((writable->Mask(PCRelAddressingMask) == ADR)) {
+      imm21 = target - logical;
+    } else {
+      VIXL_ASSERT(writable->Mask(PCRelAddressingMask) == ADRP);
+      uintptr_t logical_page = reinterpret_cast<uintptr_t>(logical) / kPageSize;
+      uintptr_t target_page = reinterpret_cast<uintptr_t>(target) / kPageSize;
+      imm21 = target_page - logical_page;
+    }
+
+    Instr imm = Assembler::ImmPCRelAddress(static_cast<int32_t>(imm21));
+    writable->SetInstructionBits(writable->Mask(~ImmPCRel_mask) | imm);
+    return;
+  }
+
+  VIXL_ASSERT(((target - logical) & 3) == 0);
+  Instr branch_imm = 0;
+  uint32_t imm_mask = 0;
+  int offset = static_cast<int>((target - logical) >> kInstructionSizeLog2);
+  switch (writable->GetBranchType()) {
+    case CondBranchType:
+      branch_imm = Assembler::ImmCondBranch(offset);
+      imm_mask = ImmCondBranch_mask;
+      break;
+    case UncondBranchType:
+      branch_imm = Assembler::ImmUncondBranch(offset);
+      imm_mask = ImmUncondBranch_mask;
+      break;
+    case CompareBranchType:
+      branch_imm = Assembler::ImmCmpBranch(offset);
+      imm_mask = ImmCmpBranch_mask;
+      break;
+    case TestBranchType:
+      branch_imm = Assembler::ImmTestBranch(offset);
+      imm_mask = ImmTestBranch_mask;
+      break;
+    default:
+      VIXL_UNREACHABLE();
+  }
+  writable->SetInstructionBits(writable->Mask(~imm_mask) | branch_imm);
+}
+}  // namespace
+.
+wq
+PATCHEND
+# Modify: dep/vixl/src/code-buffer-vixl.cc
+ed -s 'dep/vixl/src/code-buffer-vixl.cc' <<'PATCHEND'
+96a
+  address_ = buffer;
+  cursor_ = buffer;
+  capacity_ = capacity;
+  SetClean();
+}
+
+void CodeBuffer::Reset(byte* buffer, byte* address, size_t capacity) {
+  buffer_ = buffer;
+  address_ = address;
+.
+37a
+      address_(reinterpret_cast<byte*>(buffer)),
+.
+32d
+31a
+CodeBuffer::CodeBuffer() : buffer_(nullptr), address_(nullptr), cursor_(nullptr), dirty_(false), capacity_(0)
+.
+wq
+PATCHEND
 # Modify: src/CMakeLists.txt
 ed -s 'src/CMakeLists.txt' <<'PATCHEND'
 5s/^/  /
@@ -441,8 +673,12 @@ if(BUILD_LIBRETRO)
 
   add_subdirectory(goosestation-libretro)
 
-  if(NOT MSVC)
+  if(SWITCH)
+    # Static archive — link options applied by the consumer (RetroArch HBL).
+  elseif(NOT MSVC AND NOT APPLE)
     target_link_options(goosestation_libretro PRIVATE -Wl,--gc-sections -Wl,--as-needed)
+  elseif(APPLE)
+    target_link_options(goosestation_libretro PRIVATE -Wl,-dead_strip)
   endif()
 else()
 .
@@ -450,54 +686,64 @@ wq
 PATCHEND
 # Modify: src/common/CMakeLists.txt
 ed -s 'src/common/CMakeLists.txt' <<'PATCHEND'
-88s/^/  /
-93,95s/^  //
-97,98s/^  //
-115s/^/  /
-115a
+90s/^/  /
+95,97s/^  //
+99,100s/^  //
+117s/^/  /
+127a
+
+if(SWITCH)
+  target_compile_definitions(common PUBLIC __SWITCH__)
+endif()
+
+target_compile_definitions(common PUBLIC ENABLE_MMAP_FASTMEM=1)
+.
+117a
   endif()
 .
-114a
+116a
   if(NOT BUILD_LIBRETRO)
 .
-99d
-96d
-95a
+101d
+98d
+97a
 elseif(MSVC AND (CPU_ARCH_ARM32 OR CPU_ARCH_ARM64))
 .
-91,92d
-90a
+93,94d
+92a
 if(WIN32 AND CPU_ARCH_X64)
 .
-88a
+90a
   else()
     # mingw: equivalents of OneCore.lib for VirtualAlloc2/PathCchCanonicalizeEx etc.
     target_link_libraries(common PRIVATE pathcch onecore)
   endif()
 .
-87a
+89a
   if(MSVC)
     target_sources(common PRIVATE
       thirdparty/StackWalker.cpp
       thirdparty/StackWalker.h
     )
 .
-84,85d
+86,87d
 wq
 PATCHEND
 # Modify: src/common/align.h
 ed -s 'src/common/align.h' <<'PATCHEND'
-110d
-109a
-#ifdef _WIN32
+12s/MSC_VER/WIN32/
+95s/MSC_VER/WIN32/
+110s/MSC_VER/WIN32/
+104a
+#endif
 .
-95d
-94a
-#ifdef _WIN32
-.
-12d
-11a
-#ifdef _WIN32
+102a
+#if defined(__SWITCH__)
+  // libnx newlib lacks posix_memalign; use C11 aligned_alloc (size must be multiple of alignment).
+  if (IsPow2(alignment))
+    size = (size + alignment - 1) & ~(alignment - 1);
+  return aligned_alloc(alignment, size);
+#else
 .
 wq
 PATCHEND
@@ -551,6 +797,29 @@ void CrashHandler::WriteDumpForCaller(std::string_view) {}
 .
 wq
 PATCHEND
+# Modify: src/common/dynamic_library.cpp
+ed -s 'src/common/dynamic_library.cpp' <<'PATCHEND'
+161a
+#elif defined(__SWITCH__)
+  return nullptr;
+.
+151a
+#elif defined(__SWITCH__)
+  // no dynamic loading on Switch
+.
+101a
+#elif defined(__SWITCH__)
+  Error::SetStringView(error, "Dynamic loading not supported on Switch");
+  return false;
+.
+19a
+#endif
+.
+18a
+#if !defined(__SWITCH__)
+.
+wq
+PATCHEND
 # Modify: src/common/fastjmp.h
 ed -s 'src/common/fastjmp.h' <<'PATCHEND'
 14a
@@ -565,24 +834,19 @@ wq
 PATCHEND
 # Modify: src/common/fifo_queue.h
 ed -s 'src/common/fifo_queue.h' <<'PATCHEND'
-244d
-243a
-#ifdef _WIN32
-.
-222d
-221a
-#ifdef _WIN32
-.
-11d
-10a
-#ifdef _WIN32
-.
+11s/MSC_VER/WIN32/
+222s/MSC_VER/WIN32/
+244s/MSC_VER/WIN32/
 wq
 PATCHEND
 # Modify: src/common/file_system.cpp
 ed -s 'src/common/file_system.cpp' <<'PATCHEND'
-2483d
-2482a
+3018a
+#elif defined(__SWITCH__)
+  return {};
+.
+2511d
+2510a
 #elif (!defined(__ANDROID__) || defined(__LIBRETRO__))
 .
 1093d
@@ -595,28 +859,35 @@ ed -s 'src/common/file_system.cpp' <<'PATCHEND'
 .
 wq
 PATCHEND
+# Modify: src/common/gsvector_neon.h
+ed -s 'src/common/gsvector_neon.h' <<'PATCHEND'
+2694s/f/u/
+2701s/f/u/
+wq
+PATCHEND
 # Modify: src/common/heap_array.h
 ed -s 'src/common/heap_array.h' <<'PATCHEND'
-483d
-482a
-#ifdef _WIN32
+108s/MSC_VER/WIN32/
+130s/MSC_VER/WIN32/
+453s/MSC_VER/WIN32/
+483s/MSC_VER/WIN32/
+wq
+PATCHEND
+# Modify: src/common/log.cpp
+ed -s 'src/common/log.cpp' <<'PATCHEND'
+171a
+  return false;
+#elif defined(__SWITCH__)
 .
-453d
-452a
-#ifdef _WIN32
-.
-130d
-129a
-#ifdef _WIN32
-.
-108d
-107a
-#ifdef _WIN32
+21a
+#elif defined(__SWITCH__)
+#include <unistd.h>
 .
 wq
 PATCHEND
 # Modify: src/common/memmap.cpp
 ed -s 'src/common/memmap.cpp' <<'PATCHEND'
+18s/P/p/
 744a
 #endif
 .
@@ -648,6 +919,433 @@ static int android_memfd_create(const char* name, unsigned int flags)
 }
 #endif
 .
+648a
+#elif defined(__SWITCH__)
+
+u32 MemMap::GetRuntimePageSize()
+{
+  return 0x1000;
+}
+
+// RSDuck-style virtmem infrastructure for MMap fastmem.
+// Backing store is plain aligned heap allocation; a virtual alias in the
+// fastmem arena is created via svcMapProcessCodeMemory.
+
+struct Mirror
+{
+  void *addr, *source;
+  u64 size;
+  std::vector<bool> mapping_state;
+
+  u64 FindIslandSize(u64 offset)
+  {
+    bool start_state = mapping_state[offset >> 12];
+    u64 island_size = 0x1000;
+    while ((offset + island_size) < size && mapping_state[(offset + island_size) >> 12] == start_state)
+      island_size += 0x1000;
+    return island_size;
+  }
+};
+
+struct VMemReservation
+{
+  void* addr;
+  VirtmemReservation* reservation;
+};
+
+struct CodeMemoryMapping
+{
+  u64 heap_memory;
+  void* code_memory;
+  size_t size;
+  void* heap_base;
+};
+
+static std::vector<VMemReservation> s_vmem_reservations;
+static std::vector<CodeMemoryMapping> s_code_memories;
+static std::vector<Mirror> s_mappings;
+
+static void* ReserveVirtmem(size_t size)
+{
+  void* addr = virtmemFindAslr(size, 0x1000);
+  if (!addr)
+    return nullptr;
+  VirtmemReservation* reservation = virtmemAddReservation(addr, size);
+  if (!reservation)
+    return nullptr;
+  s_vmem_reservations.push_back({addr, reservation});
+  return addr;
+}
+
+static void FreeVirtmem(void* addr)
+{
+  for (auto it = s_vmem_reservations.begin(); it != s_vmem_reservations.end(); ++it)
+  {
+    if (it->addr == addr)
+    {
+      virtmemRemoveReservation(it->reservation);
+      s_vmem_reservations.erase(it);
+      return;
+    }
+  }
+}
+
+static u32 ToHOSPermission(PageProtect mode)
+{
+  switch (mode)
+  {
+    case PageProtect::ReadOnly:  return Perm_R;
+    case PageProtect::ReadWrite: return Perm_Rw;
+    case PageProtect::NoAccess:  return Perm_None;
+    default:                     return Perm_None;
+  }
+}
+
+bool MemMap::MemProtect(void* baseaddr, size_t size, PageProtect mode)
+{
+  DebugAssert((reinterpret_cast<uintptr_t>(baseaddr) & (GetRuntimePageSize() - 1)) == 0);
+  DebugAssert((size & (GetRuntimePageSize() - 1)) == 0);
+
+  // Check CodeMemories (primary mappings created by svcMapProcessCodeMemory).
+  for (auto& cm : s_code_memories)
+  {
+    if (reinterpret_cast<u64>(baseaddr) >= reinterpret_cast<u64>(cm.code_memory) &&
+        reinterpret_cast<u64>(baseaddr) + size <= reinterpret_cast<u64>(cm.code_memory) + cm.size)
+    {
+      Result rc = svcSetMemoryPermission(baseaddr, size, ToHOSPermission(mode));
+      if (R_FAILED(rc))
+      {
+        WARNING_LOG("svcSetMemoryPermission({}, {}, 0x{:X}) failed: 0x{:X}", baseaddr, size, static_cast<u32>(mode), rc);
+        return false;
+      }
+      return true;
+    }
+  }
+
+  // Check Mirror mappings (aliases within the arena).
+  for (auto& m : s_mappings)
+  {
+    if (reinterpret_cast<u64>(baseaddr) >= reinterpret_cast<u64>(m.addr) &&
+        reinterpret_cast<u64>(baseaddr) + size <= reinterpret_cast<u64>(m.addr) + m.size)
+    {
+      u64 offset = reinterpret_cast<u64>(baseaddr) - reinterpret_cast<u64>(m.addr);
+      u64 src = reinterpret_cast<u64>(m.source);
+      u32 perms = ToHOSPermission(mode);
+
+      while (size > 0)
+      {
+        u64 island_size = m.FindIslandSize(offset);
+        if (island_size > size)
+          island_size = size;
+
+        if (mode == PageProtect::ReadWrite)
+        {
+          if (!m.mapping_state[offset >> 12])
+          {
+            Result rc = svcMapProcessMemory(reinterpret_cast<void*>(reinterpret_cast<u64>(m.addr) + offset),
+              envGetOwnProcessHandle(), src + offset, island_size);
+            if (R_FAILED(rc))
+            {
+              WARNING_LOG("svcMapProcessMemory failed: 0x{:X}", rc);
+              return false;
+            }
+          }
+        }
+        else
+        {
+          if (m.mapping_state[offset >> 12])
+          {
+            Result rc = svcUnmapProcessMemory(reinterpret_cast<void*>(reinterpret_cast<u64>(m.addr) + offset),
+              envGetOwnProcessHandle(), src + offset, island_size);
+            if (R_FAILED(rc))
+            {
+              WARNING_LOG("svcUnmapProcessMemory failed: 0x{:X}", rc);
+              return false;
+            }
+          }
+        }
+
+        bool original_state = m.mapping_state[offset >> 12];
+        for (u64 i = 0; i < island_size >> 12; i++)
+          m.mapping_state[(offset >> 12) + i] = (mode == PageProtect::ReadWrite);
+
+        offset += island_size;
+        size -= island_size;
+      }
+      return true;
+    }
+  }
+
+  // Fallback: direct kernel perm change (heuristically used for heap/JIT).
+  Result rc = svcSetMemoryPermission(baseaddr, size, ToHOSPermission(mode));
+  if (R_FAILED(rc))
+  {
+    WARNING_LOG("svcSetMemoryPermission({}, {}, 0x{:X}) failed: 0x{:X}", baseaddr, size, static_cast<u32>(mode), rc);
+    return false;
+  }
+  return true;
+}
+
+std::string MemMap::GetFileMappingName(const char* prefix)
+{
+  return {};
+}
+
+// Switch has no real POSIX shared memory. We don't need cross-process semantics
+// here — Bus uses shmem only to back RAM/BIOS/LUTs and (on platforms with mmap
+// fastmem) to alias RAM at a guard region. Fastmem is disabled on Switch
+// (ENABLE_MMAP_FASTMEM off), so a plain aligned heap allocation works: the
+// "handle" is the base pointer; MapSharedMemory just returns handle + offset.
+void* MemMap::CreateSharedMemory(const char* name, size_t size, Error* error)
+{
+  void* p = aligned_alloc(0x1000, (size + 0xFFF) & ~size_t(0xFFF));
+  if (!p)
+  {
+    Error::SetStringView(error, "aligned_alloc failed for shared memory backing");
+    return nullptr;
+  }
+  return p;
+}
+
+void MemMap::DestroySharedMemory(void* ptr)
+{
+#if defined(ENABLE_MMAP_FASTMEM)
+  for (auto it = s_code_memories.begin(); it != s_code_memories.end();)
+  {
+    if (it->heap_base == ptr)
+    {
+      Result result = svcUnmapProcessCodeMemory(envGetOwnProcessHandle(),
+        reinterpret_cast<u64>(it->code_memory), it->heap_memory, it->size);
+      if (R_FAILED(result))
+        WARNING_LOG("svcUnmapProcessCodeMemory failed: 0x{:X}", result);
+      it = s_code_memories.erase(it);
+    }
+    else
+    {
+      ++it;
+    }
+  }
+#endif
+  free(ptr);
+}
+
+void MemMap::DeleteSharedMemory(const char* name)
+{
+}
+
+void* MemMap::MapSharedMemory(void* handle, size_t offset, void* baseaddr, size_t size, PageProtect mode)
+{
+  if (!handle)
+    return nullptr;
+
+#if !defined(ENABLE_MMAP_FASTMEM)
+  return static_cast<u8*>(handle) + offset;
+#else
+  virtmemLock();
+
+  if (!baseaddr)
+  {
+    baseaddr = ReserveVirtmem(size);
+    if (!baseaddr)
+    {
+      virtmemUnlock();
+      return nullptr;
+    }
+  }
+  virtmemUnlock();
+
+  u64 heap_memory = reinterpret_cast<u64>(handle) + offset;
+
+  // Check if already mapped from this heap allocation.
+  for (auto it = s_code_memories.begin(); it != s_code_memories.end(); ++it)
+  {
+    if (it->heap_memory == reinterpret_cast<u64>(handle) + offset)
+    {
+      s_mappings.push_back({baseaddr, static_cast<u8*>(it->code_memory), size,
+                            std::vector<bool>(size >> 12)});
+      MemMap::MemProtect(baseaddr, size, PageProtect::ReadWrite);
+      return static_cast<u8*>(baseaddr);
+    }
+  }
+
+  Result rc = svcMapProcessCodeMemory(envGetOwnProcessHandle(),
+    reinterpret_cast<u64>(baseaddr), heap_memory, size);
+  if (R_FAILED(rc))
+  {
+    WARNING_LOG("svcMapProcessCodeMemory failed: 0x{:X}", rc);
+    return nullptr;
+  }
+  rc = svcSetProcessMemoryPermission(envGetOwnProcessHandle(),
+    reinterpret_cast<u64>(baseaddr), size, ToHOSPermission(mode));
+  if (R_FAILED(rc))
+  {
+    WARNING_LOG("svcSetProcessMemoryPermission failed: 0x{:X}", rc);
+    return nullptr;
+  }
+  s_code_memories.push_back({heap_memory, baseaddr, size, handle});
+  return static_cast<u8*>(baseaddr);
+#endif
+}
+
+void MemMap::UnmapSharedMemory(void* baseaddr, size_t size)
+{
+#if !defined(ENABLE_MMAP_FASTMEM)
+  return;
+#else
+  for (auto it = s_code_memories.begin(); it != s_code_memories.end(); ++it)
+  {
+    if (it->code_memory == baseaddr)
+      return; // only unmap when backing memory is destroyed
+  }
+  for (auto it = s_mappings.begin(); it != s_mappings.end(); ++it)
+  {
+    if (it->addr == baseaddr)
+    {
+      MemMap::MemProtect(baseaddr, size, PageProtect::NoAccess);
+      s_mappings.erase(it);
+      return;
+    }
+  }
+#endif
+}
+
+const void* MemMap::GetBaseAddress()
+{
+  return reinterpret_cast<const void*>(&GetBaseAddress);
+}
+
+namespace {
+static ::Jit s_switch_jit{};
+static bool s_switch_jit_inited = false;
+static u8* s_switch_jit_rx = nullptr;
+static u8* s_switch_jit_rw = nullptr;
+static size_t s_switch_jit_size = 0;
+} // namespace
+
+void* MemMap::AllocateJITMemoryAt(const void* addr, size_t size)
+{
+  if (s_switch_jit_inited)
+  {
+    ERROR_LOG("Switch JIT already allocated; only single-buffer supported");
+    return nullptr;
+  }
+
+  Result rc = jitCreate(&s_switch_jit, size);
+  if (R_FAILED(rc))
+  {
+    ERROR_LOG("jitCreate({}) failed: 0x{:X}", size, rc);
+    return nullptr;
+  }
+
+  void* rx = jitGetRxAddr(&s_switch_jit);
+  void* rw = jitGetRwAddr(&s_switch_jit);
+  s_switch_jit_inited = true;
+  s_switch_jit_rx = static_cast<u8*>(rx);
+  s_switch_jit_rw = static_cast<u8*>(rw);
+  s_switch_jit_size = size;
+  if (rx != rw)
+  {
+    WARNING_LOG("Switch JIT is dual-mapped (RX={} RW={}); using RW mapping for code emission.", rx, rw);
+  }
+  else
+  {
+    INFO_LOG("Switch JIT allocated {} bytes at {} (single-mapped)", size, rx);
+  }
+  return rx;
+}
+
+void MemMap::ReleaseJITMemory(void* ptr, size_t size)
+{
+  if (!s_switch_jit_inited)
+    return;
+  jitClose(&s_switch_jit);
+  s_switch_jit_inited = false;
+  s_switch_jit_rx = nullptr;
+  s_switch_jit_rw = nullptr;
+  s_switch_jit_size = 0;
+}
+
+void* MemMap::GetJITMemoryWritePointer(void* ptr)
+{
+  if (!s_switch_jit_inited || !ptr || s_switch_jit_rx == s_switch_jit_rw)
+    return ptr;
+
+  u8* const uptr = static_cast<u8*>(ptr);
+  if (uptr < s_switch_jit_rx || uptr >= (s_switch_jit_rx + s_switch_jit_size))
+    return ptr;
+
+  return s_switch_jit_rw + (uptr - s_switch_jit_rx);
+}
+
+// NOT thread_local: libnx threads spawned via raw svcCreateThread (e.g. RA's
+// pool) don't init C++ static TLS, so thread_local access faults. Code cache
+// emit is single-threaded — plain static is correct.
+static int s_code_write_depth = 0;
+
+void MemMap::BeginCodeWrite()
+{
+  // On dual-mapped JIT (JitType_JitMemory), the RW and RX mappings are always
+  // writable/executable respectively — no permission toggle needed. Only
+  // single-mapped (JitType_CodeMemory) requires jitTransitionToWritable.
+  // Targeted FlushInstructionCache per code range handles cache maintenance.
+  s_code_write_depth++;
+}
+
+void MemMap::EndCodeWrite()
+{
+  DebugAssert(s_code_write_depth > 0);
+  // Dual-mapped JIT: no jitTransitionToExecutable needed (see BeginCodeWrite).
+  s_code_write_depth--;
+}
+
+void MemMap::FlushInstructionCache(void* address, size_t size)
+{
+  // On dual-mapped JIT the dcache flush must target the RW alias (where the
+  // CPU just wrote); icache invalidate targets the RX alias (what will be
+  // executed). libnx's arm{D,I}Cache* helpers issue their own dsb ish, so no
+  // explicit barriers needed here.
+  armDCacheFlush(GetJITMemoryWritePointer(address), size);
+  armICacheInvalidate(address, size);
+}
+
+SharedMemoryMappingArea::SharedMemoryMappingArea() = default;
+
+SharedMemoryMappingArea::~SharedMemoryMappingArea()
+{
+  Destroy();
+}
+
+bool SharedMemoryMappingArea::Create(size_t size)
+{
+  virtmemLock();
+  m_base_ptr = reinterpret_cast<u8*>(ReserveVirtmem(size));
+  virtmemUnlock();
+  return m_base_ptr != nullptr;
+}
+
+void SharedMemoryMappingArea::Destroy()
+{
+  virtmemLock();
+  FreeVirtmem(m_base_ptr);
+  m_base_ptr = nullptr;
+  m_size = 0;
+  m_num_pages = 0;
+  m_num_mappings = 0;
+  virtmemUnlock();
+}
+
+u8* SharedMemoryMappingArea::Map(void* file_handle, size_t file_offset, void* map_base, size_t map_size, PageProtect mode)
+{
+  return static_cast<u8*>(MemMap::MapSharedMemory(file_handle, file_offset, map_base, map_size, mode));
+}
+
+bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size)
+{
+  MemMap::UnmapSharedMemory(map_base, map_size);
+  return true;
+}
+
+.
 142a
   }
 .
@@ -658,33 +1356,149 @@ static int android_memfd_create(const char* name, unsigned int flags)
                           reinterpret_cast<LPCWSTR>(&GetBaseAddress), &mod))
   {
 .
-18d
-17a
-#include <psapi.h>
+30a
+#elif defined(__SWITCH__)
+#include <cerrno>
+#include <cstdlib>
+#include <unistd.h>
+#include <switch.h>
+
+// libnx newlib lacks these POSIX symbols; provide weak shims for third-party deps
+// (dep/lzma calls posix_memalign; common/file_system.cpp calls lockf).
+extern "C" {
+int posix_memalign(void** memptr, size_t alignment, size_t size)
+{
+  if (alignment == 0 || (alignment & (alignment - 1)) != 0)
+    return EINVAL;
+  size_t rounded = (size + alignment - 1) & ~(alignment - 1);
+  void* p = aligned_alloc(alignment, rounded);
+  if (!p)
+    return ENOMEM;
+  *memptr = p;
+  return 0;
+}
+
+int lockf(int /*fd*/, int /*cmd*/, off_t /*len*/)
+{
+  return 0; // no-op; Switch is single-process for our use
+}
+}
+.
+13a
+#ifdef __SWITCH__
+#include "timer.h"
+#endif
+
+.
+wq
+PATCHEND
+# Modify: src/common/memmap.h
+ed -s 'src/common/memmap.h' <<'PATCHEND'
+84,85d
+83a
+/// JIT write protect for Apple Silicon / Switch. Needs to be called prior to writing to any RWX pages.
+#if (!defined(__APPLE__) || !defined(__aarch64__)) && !defined(__SWITCH__)
+.
+73a
+#if defined(__SWITCH__)
+/// Returns the writable mirror for a pointer in the JIT region. On dual-mapped
+/// JIT the RX (execute) and RW (write) mappings are separate; recompiler emits
+/// at logical/RX addresses but stores must target RW. No-op on single-mapped.
+void* GetJITMemoryWritePointer(void* ptr);
+#endif
+
+/// Translates a JIT pointer to its writable mirror. No-op on platforms with a
+/// single RWX mapping; lets call sites stay free of __SWITCH__ ifdefs.
+ALWAYS_INLINE static void* GetJITWritePointer(void* ptr)
+{
+#if defined(__SWITCH__)
+  return GetJITMemoryWritePointer(ptr);
+#else
+  return ptr;
+#endif
+}
+
+.
+33a
+};
+
+#elif defined(__SWITCH__)
+
+enum class PageProtect : u32
+{
+  NoAccess = 0,
+  ReadOnly = 1,
+  ReadWrite = 1 | 2,
+  ReadExecute = 1 | 4,
+  ReadWriteExecute = 1 | 2 | 4,
 .
 wq
 PATCHEND
 # Modify: src/common/threading.cpp
 ed -s 'src/common/threading.cpp' <<'PATCHEND'
+645a
+#elif defined(__SWITCH__)
+  (void)name;
+.
 639a
 #elif defined(_WIN32)
   // mingw: no SEH, no-op.
   (void)name;
 .
+562a
+#elif defined(__SWITCH__)
+  return 0;
+.
+270a
+#elif defined(__SWITCH__)
+  {
+    clockid_t cid;
+    if (m_native_handle &&
+        pthread_getcpuclockid((pthread_t)m_native_handle, &cid) == 0)
+    {
+      struct timespec ts;
+      if (clock_gettime(cid, &ts) == 0)
+        return static_cast<u64>(ts.tv_sec) * 1000000ULL + static_cast<u64>(ts.tv_nsec) / 1000ULL;
+    }
+  }
+  return 0;
+.
+42a
+#elif defined(__SWITCH__)
+// libnx pthread shim
+.
+13a
+
+#include <time.h>
+.
 wq
 PATCHEND
 # Modify: src/common/time_helpers.h
 ed -s 'src/common/time_helpers.h' <<'PATCHEND'
-15d
-14a
-#ifdef _WIN32
+15s/MSC_VER/WIN32/
+wq
+PATCHEND
+# Modify: src/common/timer.cpp
+ed -s 'src/common/timer.cpp' <<'PATCHEND'
+219d
+218a
+#if defined(__APPLE__) || defined(__SWITCH__)
 .
 wq
 PATCHEND
 # Modify: src/core/CMakeLists.txt
 ed -s 'src/core/CMakeLists.txt' <<'PATCHEND'
 154s/^/  /
+180s/^/  /
 209,221d
+180a
+  else()
+    target_compile_definitions(core PUBLIC "ENABLE_RECOMPILER=1" "ENABLE_MMAP_FASTMEM=1")
+  endif()
+.
+179a
+  if(SWITCH)
+.
 154a
 endif()
 .
@@ -710,8 +1524,38 @@ wq
 PATCHEND
 # Modify: src/core/achievements.h
 ed -s 'src/core/achievements.h' <<'PATCHEND'
-228a
+160s/Current//
+163s/Current//
+179s/IconURL/BadgePath/
+226a
 #endif // !__LIBRETRO__
+.
+200d
+185,186d
+184a
+/// Returns the path to the local cache for the specified badge name.
+std::string GetGameBadgePath(std::string_view badge_name);
+.
+175d
+174a
+const char* GetLoggedInUserName();
+.
+171,173d
+156d
+155a
+const std::string& GetGameIconURL();
+
+/// Returns the path for the current icon of the game
+const std::string& GetGameIconPath();
+.
+105a
+
+/// Returns true if idle updates are necessary (e.g. outstanding requests).
+bool NeedsIdleUpdate();
+.
+78d
+77a
+bool Initialize();
 .
 4a
 
@@ -734,7 +1578,7 @@ cat > 'src/core/achievements_libretro.h' <<'PATCHEND'
 #include <string_view>
 
 class CDImage;
-class Settings;
+struct Settings;
 class StateWrapper;
 
 namespace Achievements {
@@ -754,7 +1598,8 @@ inline void DisableHardcoreMode(bool, bool = false) {}
 inline u32 GetGameID() { return 0; }
 inline bool HasRichPresence() { return false; }
 inline std::string GetRichPresenceString() { return {}; }
-inline std::string GetGameIconURL() { return {}; }
+inline const std::string& GetCurrentGameBadgeURL() { static const std::string s; return s; }
+inline std::string GetGameBadgeURL(u32) { return {}; }
 inline u32 GetPauseThrottleFrames() { return 0; }
 inline bool DoState(StateWrapper&) { return true; }
 
@@ -825,6 +1670,14 @@ wq
 PATCHEND
 # Modify: src/core/bus.cpp
 ed -s 'src/core/bus.cpp' <<'PATCHEND'
+547d
+546a
+  // Return nullptr for I/O pages so the recompiler can use a cbz (compare-
+  // and-branch-on-zero) check instead of relying on a page fault. On slow
+  // ARM CPUs, a cbz+fallback is orders of magnitude cheaper than a kernel
+  // exception roundtrip.
+  return ram_ptr ? (ram_ptr - address) : nullptr;
+.
 53,54d
 52a
 __declspec(dllexport) uintptr_t RAM;
@@ -834,6 +1687,7 @@ wq
 PATCHEND
 # Modify: src/core/cdrom.cpp
 ed -s 'src/core/cdrom.cpp' <<'PATCHEND'
+1032s/FullscreenUI::LoadingScreen//
 4361a
 
 #endif
@@ -843,10 +1697,6 @@ ed -s 'src/core/cdrom.cpp' <<'PATCHEND'
   return;
 #else
 
-.
-1032d
-1031a
-  ProgressCallback callback;
 .
 38a
 #endif
@@ -883,30 +1733,30 @@ wq
 PATCHEND
 # Modify: src/core/core.cpp
 ed -s 'src/core/core.cpp' <<'PATCHEND'
-527d
-526a
+525d
+524a
 #if defined(__ANDROID__) && !defined(__LIBRETRO__)
 .
-313a
+311a
 #endif
 .
-312a
+310a
 #ifndef __LIBRETRO__
 .
-225d
-224a
+223d
+222a
 #if !defined(__ANDROID__) || defined(__LIBRETRO__)
 .
-107d
-106a
+105d
+104a
 #if !defined(__ANDROID__) || defined(__LIBRETRO__)
 .
-48d
-47a
+46d
+45a
 #if !defined(__ANDROID__) || defined(__LIBRETRO__)
 .
-31d
-30a
+29d
+28a
 #include <shlobj.h>
 .
 wq
@@ -920,6 +1770,62 @@ ed -s 'src/core/core_private.h' <<'PATCHEND'
 15d
 14a
 #if !defined(__ANDROID__) || defined(__LIBRETRO__)
+.
+wq
+PATCHEND
+# Modify: src/core/cpu_code_cache.cpp
+ed -s 'src/core/cpu_code_cache.cpp' <<'PATCHEND'
+1722d
+1721a
+  // Track the faulting guest PC so future compilations skip fastmem for this
+  // site. The backpatched instruction (now a jump to the slow-path thunk) stays
+  // in place — no block invalidation needed. The block keeps running.
+.
+1706,1719d
+1691a
+  }
+.
+1690a
+  {
+    WARNING_LOG("HandleFastmemException: no backpatch info for PC={} (fault={})", exception_pc, fault_address);
+.
+1688a
+  // Backpatch keys are RX/logical addresses on all platforms. On Switch with
+  // dual-mapped JIT, vixl's CodeBuffer is reset with the RX address so cursor
+  // queries (which become AddLoadStoreInfo's key) match the kernel-reported
+  // exception_pc — no translation needed at lookup time.
+.
+1445d
+1444a
+      std::memset(MemMap::GetJITWritePointer(s_far_code_ptr), 0, s_far_code_used);
+.
+1439d
+1438a
+      std::memset(MemMap::GetJITWritePointer(s_code_ptr), 0, s_code_used);
+.
+1342a
+  // Flush dcache/icache for the new code range before linking it into the LUT.
+  // Required now that EndCodeWrite no longer does a global jitTransition* flush.
+  MemMap::FlushInstructionCache(const_cast<void*>(block->host_code), block->host_code_size);
+.
+615a
+#endif
+.
+613a
+#ifdef __SWITCH__
+  // AliasCode mirrors on Switch only support R+W or R+X — there is no cheap
+  // RO state. WriteProtect SMC would need to unmap+remap the mirror per
+  // transition, which is incompatible with mixed code+data pages.
+  return PageProtectionMode::ManualCheck;
+#else
+.
+123d
+122a
+static constexpr u32 RECOMPILER_FAR_CODE_CACHE_SIZE = 8 * 1024 * 1024;
+#elif defined(__SWITCH__)
+// AArch64: no range limit like ARM32. RSDuck uses 32+16MB for Switch.
+static constexpr u32 RECOMPILER_CODE_CACHE_SIZE = 32 * 1024 * 1024;
+static constexpr u32 RECOMPILER_FAR_CODE_CACHE_SIZE = 16 * 1024 * 1024;
 .
 wq
 PATCHEND
@@ -940,6 +1846,147 @@ ed -s 'src/core/cpu_core.cpp' <<'PATCHEND'
 11a
 #ifndef __LIBRETRO__
 .
+wq
+PATCHEND
+# Modify: src/core/cpu_recompiler_arm64.cpp
+ed -s 'src/core/cpu_recompiler_arm64.cpp' <<'PATCHEND'
+1824s/const //2
+2690d
+2689a
+  Assembler arm_asm;
+  arm_asm.GetBuffer()->Reset(static_cast<u8*>(MemMap::GetJITWritePointer(thunk_code)), static_cast<u8*>(thunk_code),
+                             thunk_space);
+.
+2286,2288d
+2285a
+  const std::optional<Register> addr_reg =
+    g_settings.gpu_pgxp_enable ? std::optional<Register>(WRegister(AllocateTempHostReg(HR_CALLEE_SAVED))) :
+                                 std::optional<Register>();
+.
+2199,2201d
+2198a
+  const std::optional<Register> addr_reg =
+    g_settings.gpu_pgxp_enable ? std::optional<Register>(WRegister(AllocateTempHostReg(HR_CALLEE_SAVED))) :
+                                 std::optional<Register>();
+.
+2072,2074d
+2071a
+  const std::optional<Register> addr_reg =
+    g_settings.gpu_pgxp_enable ? std::optional<Register>(WRegister(AllocateTempHostReg(HR_CALLEE_SAVED))) :
+                                 std::optional<Register>();
+.
+2011a
+
+    if (g_settings.cpu_fastmem_mode == CPUFastmemMode::LUT)
+    {
+      armAsm->b(&done);
+      armAsm->bind(&slow_path);
+
+      if (addr_reg.GetCode() != RWARG1.GetCode())
+        armAsm->mov(RWARG1, addr_reg);
+      if (value_reg.GetCode() != RWARG2.GetCode())
+        armAsm->mov(RWARG2, value_reg);
+
+      const bool checked = g_settings.cpu_recompiler_memory_exceptions;
+      switch (size)
+      {
+        case MemoryAccessSize::Byte:
+          EmitCall(checked ? reinterpret_cast<const void*>(&CPU::RecompilerThunks::WriteMemoryByte) :
+                             reinterpret_cast<const void*>(&CPU::RecompilerThunks::UncheckedWriteMemoryByte));
+          break;
+        case MemoryAccessSize::HalfWord:
+          EmitCall(checked ? reinterpret_cast<const void*>(&CPU::RecompilerThunks::WriteMemoryHalfWord) :
+                             reinterpret_cast<const void*>(&CPU::RecompilerThunks::UncheckedWriteMemoryHalfWord));
+          break;
+        case MemoryAccessSize::Word:
+          EmitCall(checked ? reinterpret_cast<const void*>(&CPU::RecompilerThunks::WriteMemoryWord) :
+                             reinterpret_cast<const void*>(&CPU::RecompilerThunks::UncheckedWriteMemoryWord));
+          break;
+      }
+
+      DebugAssert(!checked);
+      armAsm->bind(&done);
+    }
+
+.
+1991a
+      armAsm->cbz(RXARG3, &slow_path);
+.
+1986a
+    Label slow_path, done;
+
+.
+1900a
+
+    if (g_settings.cpu_fastmem_mode == CPUFastmemMode::LUT)
+    {
+      armAsm->b(&done);
+      armAsm->bind(&slow_path);
+
+      if (addr_reg.GetCode() != RWARG1.GetCode())
+        armAsm->mov(RWARG1, addr_reg);
+
+      const bool checked = g_settings.cpu_recompiler_memory_exceptions;
+      switch (size)
+      {
+        case MemoryAccessSize::Byte:
+          EmitCall(checked ? reinterpret_cast<const void*>(&CPU::RecompilerThunks::ReadMemoryByte) :
+                             reinterpret_cast<const void*>(&CPU::RecompilerThunks::UncheckedReadMemoryByte));
+          break;
+        case MemoryAccessSize::HalfWord:
+          EmitCall(checked ? reinterpret_cast<const void*>(&CPU::RecompilerThunks::ReadMemoryHalfWord) :
+                             reinterpret_cast<const void*>(&CPU::RecompilerThunks::UncheckedReadMemoryHalfWord));
+          break;
+        case MemoryAccessSize::Word:
+          EmitCall(checked ? reinterpret_cast<const void*>(&CPU::RecompilerThunks::ReadMemoryWord) :
+                             reinterpret_cast<const void*>(&CPU::RecompilerThunks::UncheckedReadMemoryWord));
+          break;
+      }
+
+      DebugAssert(!checked);
+      if (dst.GetCode() != RWRET.GetCode())
+        armAsm->mov(dst, RWRET);
+
+      armAsm->bind(&done);
+    }
+
+.
+1879a
+      armAsm->cbz(RXARG3, &slow_path);
+.
+1873a
+    Label slow_path, done;
+.
+566,567d
+565a
+  m_emitter.GetBuffer()->Reset(static_cast<u8*>(MemMap::GetJITWritePointer(code_buffer)), code_buffer,
+                               code_buffer_space);
+  m_far_emitter.GetBuffer()->Reset(static_cast<u8*>(MemMap::GetJITWritePointer(far_code_buffer)), far_code_buffer,
+                                   far_code_space);
+.
+545d
+544a
+  std::memset(MemMap::GetJITWritePointer(dst), padding_value, size);
+.
+448d
+447a
+  Assembler actual_asm;
+  actual_asm.GetBuffer()->Reset(static_cast<u8*>(MemMap::GetJITWritePointer(code)), static_cast<u8*>(code), code_size);
+.
+437d
+436a
+  std::memcpy(MemMap::GetJITWritePointer(code), &new_code, sizeof(new_code));
+.
+373d
+372a
+  vixl::aarch64::Assembler armAsm;
+  armAsm.GetBuffer()->Reset(static_cast<u8*>(MemMap::GetJITWritePointer(start)), start, TRAMPOLINE_AREA_SIZE - offset);
+.
+wq
+PATCHEND
+# Modify: src/core/cpu_recompiler_arm64.h
+ed -s 'src/core/cpu_recompiler_arm64.h' <<'PATCHEND'
+102s/const //2
 wq
 PATCHEND
 # Modify: src/core/dma.cpp
@@ -1118,8 +2165,16 @@ inline const Entry* GetEntryForGameDetails(const std::string&, u64) { return nul
 PATCHEND
 # Modify: src/core/game_list.h
 ed -s 'src/core/game_list.h' <<'PATCHEND'
-202a
+200a
 #endif // !__LIBRETRO__
+.
+187a
+std::string GetAchievementGameBadgePath(u32 game_id);
+void UpdateAchievementBadgeName(u32 game_id, std::string_view badge_name);
+.
+182d
+181a
+void UpdateAchievementData(const std::span<u8, 16> hash, u32 game_id, u32 num_achievements, u32 num_unlocked,
 .
 4a
 
@@ -1255,10 +2310,10 @@ wq
 PATCHEND
 # Modify: src/core/gpu_backend.cpp
 ed -s 'src/core/gpu_backend.cpp' <<'PATCHEND'
-595a
+597a
 #endif
 .
-581a
+583a
 #ifdef __LIBRETRO__
     ReleaseQueuedFrame();
 #else
@@ -1305,12 +2360,31 @@ ed -s 'src/core/gpu_hw.cpp' <<'PATCHEND'
 4404a
 #ifndef __LIBRETRO__
 .
+4208a
+  }
+.
+4207a
+  {
+.
+4197a
+      }
+.
+4196a
+      {
+.
+4191a
+        }
+.
+4190a
+        {
+.
 4184a
 #endif
 .
 4170a
 #ifndef __LIBRETRO__
 .
+4161d
 4155a
 #endif
 
@@ -1330,6 +2404,7 @@ ed -s 'src/core/gpu_hw.cpp' <<'PATCHEND'
       u32 line_skip;
 #else
 .
+4138d
 4115a
 #endif
 .
@@ -1339,7 +2414,13 @@ ed -s 'src/core/gpu_hw.cpp' <<'PATCHEND'
 #else
 .
 4081a
-#ifdef __LIBRETRO__
+#if defined(__LIBRETRO__) && !defined(__APPLE__)
+    // On Linux, UpdateVRAMReadTexture is needed to resolve dirty regions before display.
+    // On macOS/MoltenVK, this copy causes a stale read: the CopyTextureRegion barrier doesn't
+    // properly synchronize with the later blit in PushVulkanHWVideoFrame within the same
+    // command buffer, causing draws (e.g. 3D models) to be missing from the displayed frame.
+    // The subsequent TransitionToLayout+vkCmdBlitImage in PushVulkanHWVideoFrame reads
+    // m_vram_texture directly and handles synchronization correctly without this pre-copy.
     if (!m_vram_dirty_draw_rect.eq(INVALID_RECT) || !m_vram_dirty_write_rect.eq(INVALID_RECT))
       UpdateVRAMReadTexture(!m_vram_dirty_draw_rect.eq(INVALID_RECT), !m_vram_dirty_write_rect.eq(INVALID_RECT));
 #endif
@@ -1353,6 +2434,7 @@ ed -s 'src/core/gpu_hw.cpp' <<'PATCHEND'
            true)
 #else
 .
+4074d
 4068d
 4067a
     VideoPresenter::SetDisplayDisabled();
@@ -1427,6 +2509,11 @@ ed -s 'src/core/gpu_hw.cpp' <<'PATCHEND'
 .
 15d
 8d
+4a
+#ifdef __SWITCH__
+#include <cstdio>
+#endif
+.
 wq
 PATCHEND
 # Modify: src/core/gpu_hw.h
@@ -1453,8 +2540,12 @@ wq
 PATCHEND
 # Modify: src/core/gpu_hw_shadergen.cpp
 ed -s 'src/core/gpu_hw_shadergen.cpp' <<'PATCHEND'
-1786,1788d
-1785a
+3164d
+3163a
+  #if API_OPENGL || API_OPENGL_ES || API_VULKAN || API_DEKO3D
+.
+2713,2715d
+2712a
 )";
 #ifdef __LIBRETRO__
   ss << "  uint2 icoords = uint2(uint(v_pos.x) + u_skip_x, uint(v_pos.y) * u_line_skip);\n";
@@ -1464,13 +2555,25 @@ ed -s 'src/core/gpu_hw_shadergen.cpp' <<'PATCHEND'
 #endif
   ss << R"(  int2 wrapped_coords = int2((icoords + u_vram_offset) % VRAM_SIZE);
 .
-1728a
+2655a
 #endif
 .
-1727a
+2654a
 #ifdef __LIBRETRO__
   DeclareUniformBuffer(ss, {"uint2 u_vram_offset", "uint u_skip_x", "uint u_line_skip"}, true);
 #else
+.
+1193d
+1192a
+#if API_OPENGL || API_OPENGL_ES || API_VULKAN || API_DEKO3D
+.
+155d
+154a
+#if API_OPENGL || API_OPENGL_ES || API_VULKAN || API_DEKO3D
+.
+66d
+65a
+  #if API_OPENGL || API_OPENGL_ES || API_VULKAN || API_DEKO3D
 .
 wq
 PATCHEND
@@ -1521,6 +2624,28 @@ ed -s 'src/core/gte.cpp' <<'PATCHEND'
   return;
 #else
 .
+857,868d
+759,770d
+324a
+  s_config.aspect_ratio = GTEAspectRatio::Custom;
+
+  DEV_COLOR_LOG(StrongOrange, "GTE aspect ratio correction set to {}:{}", aspect.numerator, aspect.denominator);
+.
+322d
+319d
+311,315d
+310a
+  // (4/3) / (num/denom) = (4*denom) / (3*num), reduced by gcd
+.
+298,306d
+297a
+    s_config.aspect_ratio = GTEAspectRatio::None;
+.
+288,296d
+287a
+  if (aspect == DisplayAspectRatio::Auto() || aspect == DisplayAspectRatio{4, 3})
+.
+58,60d
 19a
 #endif
 .
@@ -1701,12 +2826,12 @@ wq
 PATCHEND
 # Modify: src/core/performance_counters.cpp
 ed -s 'src/core/performance_counters.cpp' <<'PATCHEND'
-243s/^/  /
-242a
+245s/^/  /
+244a
   if (g_gpu_device)
 .
-222d
-221a
+224d
+223a
   if (g_gpu_device && g_gpu_device->IsGPUTimingEnabled())
 .
 wq
@@ -1751,6 +2876,40 @@ inline bool Load(const std::string&, Error*) { return false; }
 PATCHEND
 # Modify: src/core/settings.cpp
 ed -s 'src/core/settings.cpp' <<'PATCHEND'
+2829a
+#endif
+.
+2809a
+#ifdef __LIBRETRO__
+  // In libretro mode the frontend owns screenshots, save states, shaders, and
+  // cheats. Only create dirs the core actually writes to at runtime.
+  EnsureFolderExists(DataRoot); // system_dir/goosestation/ — parent for Cache
+  EnsureFolderExists(Cache);    // compiled shader/texture cache
+#else
+.
+1655a
+#endif
+
+#ifdef __SWITCH__
+    case RenderAPI::Deko3D:
+      return GPURenderer::HardwareDeko3D;
+.
+1622a
+#ifdef __SWITCH__
+    case GPURenderer::HardwareDeko3D:
+      return RenderAPI::Deko3D;
+#endif
+.
+1571a
+#endif
+#ifdef __SWITCH__
+  TRANSLATE_DISAMBIG_NOOP("Settings", "Deko3D", "GPURenderer"),
+.
+1555a
+#ifdef __SWITCH__
+  "Deko3D",
+#endif
+.
 628d
 627a
 #if defined(__ANDROID__) && !defined(__LIBRETRO__)
@@ -1811,52 +2970,73 @@ wq
 PATCHEND
 # Modify: src/core/system.cpp
 ed -s 'src/core/system.cpp' <<'PATCHEND'
-5862a
+98s/O/o/
+6315,6332d
+6314a
+
+  if (gte_ar == DisplayAspectRatio::Auto())
+    gte_ar = DisplayAspectRatio{16, 9};
+  // else: explicit AR passed through → GTE correction for that ratio
+.
+6312,6313d
+6311a
+    GTE::SetAspectRatio(DisplayAspectRatio::Auto());
+    return;
+.
+6308,6310d
+6307a
+
+  // No GTE correction without widescreen hack, for PAR 1:1, or for Stretch
+  // (Stretch is delegated to the frontend's video settings in the libretro build).
+  if (!g_settings.gpu_widescreen_hack || gte_ar == DisplayAspectRatio::PAR1_1() ||
+      gte_ar == DisplayAspectRatio::Stretch())
+.
+5867a
 #endif
 .
-5861a
+5866a
 #endif
 .
-5842a
+5847a
 #ifndef __LIBRETRO__
 .
-5838a
+5843a
 #endif
 .
-5821a
+5826a
 #ifndef __LIBRETRO__
 .
-5817a
+5822a
 #endif
+.
+5764a
+#ifdef __LIBRETRO__
+  return false;
+#else
 .
 5759a
-#ifdef __LIBRETRO__
-  return false;
-#else
-.
-5754a
 #endif
 .
-5720a
+5725a
 #ifdef __LIBRETRO__
   return false;
 #else
 .
-5689a
+5694a
 #ifndef __LIBRETRO__
 .
-2405d
-2404a
+2410d
+2409a
     ((is_duplicate_frame || (s_state.throttler_enabled && !s_state.optimal_frame_pacing &&
                              current_time > s_state.next_frame_time &&
 .
-2048a
+2051a
 #endif
 .
-2045a
+2048a
 #ifndef __LIBRETRO__
 .
-1721a
+1724a
 
 #ifdef __LIBRETRO__
   // Only the state change is needed — the full pause/resume machinery is harmful per-frame.
@@ -1864,25 +3044,25 @@ ed -s 'src/core/system.cpp' <<'PATCHEND'
 #endif
 
 .
-1632a
+1635a
 #endif
 .
-1554a
+1557a
 #ifdef __LIBRETRO__
   return nullptr;
 #else
 .
-819a
+823a
 #endif
 .
-815a
+819a
 #ifndef __LIBRETRO__
 .
-540d
-539a
+541d
+540a
 #if defined(_WIN32) && !defined(__LIBRETRO__)
 .
-186a
+187a
 
 #ifdef __LIBRETRO__
 static bool StartMediaCapture(std::string path, bool capture_video, bool capture_audio, u32 video_width,
@@ -1896,20 +3076,16 @@ static void StopMediaCapture(std::unique_ptr<MediaCapture> cap)
 }
 #endif
 .
-104a
+105a
 #endif
 .
-100a
+101a
 #ifndef __LIBRETRO__
 .
-97d
-96a
-#include <objbase.h>
-.
-82a
+83a
 #endif
 .
-81a
+82a
 #ifndef __LIBRETRO__
 .
 26d
@@ -1977,50 +3153,70 @@ ed -s 'src/core/timers.cpp' <<'PATCHEND'
 .
 wq
 PATCHEND
+# Modify: src/core/types.h
+ed -s 'src/core/types.h' <<'PATCHEND'
+75a
+#endif
+#ifdef __SWITCH__
+  HardwareDeko3D,
+.
+wq
+PATCHEND
 # Modify: src/core/video_presenter.cpp
 ed -s 'src/core/video_presenter.cpp' <<'PATCHEND'
-1753s/^  //
-1793,1795s/^  //
-1797,1804s/^  //
-1816a
+1752s/^  //
+1791,1793s/^  //
+1795,1802s/^  //
+1813a
 #endif
 .
-1806,1811d
-1796d
-1784,1792d
-1777d
-1776a
+1804,1809d
+1794d
+1764,1790d
+1757d
+1756a
+}
+
+void VideoPresenter::ReloadPostProcessingSettings(bool display, bool internal, bool reload_shaders)
+{
   if (!display)
     return;
 .
-1758,1772d
-1746,1752d
-1708,1743d
-1707a
+1745,1751d
+1707,1742d
+1706a
 #ifndef __LIBRETRO__
 .
-1606a
+1605a
 #endif
 .
-1601,1603d
-1487a
+1600,1602d
+1486a
 #ifdef __LIBRETRO__
   return true;
 #else
 .
-1199a
+1339,1340d
+1235d
+1234a
+      GL_INS("Deinterlacing disabled/progressive, displaying field texture");
+.
+1233a
+    case DisplayDeinterlacingMode::Progressive:
+.
+1198a
 #endif
 .
-1175a
+1174a
 #ifndef __LIBRETRO__
 .
-1035,1146d
-733,794d
-677,712d
-593d
-581d
-571d
-570a
+1034,1145d
+732,793d
+676,711d
+592d
+580d
+570d
+569a
 }
 
 void VideoPresenter::SetDisplayDisabled()
@@ -2030,38 +3226,100 @@ void VideoPresenter::SetDisplayDisabled()
   s_locals.display_texture = nullptr;
   s_locals.display_texture_rect = GSVector4i::zero();
 .
-242,243d
-219,220d
-212,213d
-178,182d
-174a
+518d
+517a
+        }
+        WARNING_LOG("VP: FastMAD pipeline created at {}", (void*)s_locals.deinterlace_pipeline.get());
+.
+516d
+515a
+        if (!(s_locals.deinterlace_pipeline = g_gpu_device->CreatePipeline(plconfig, error))) {
+          ERROR_LOG("VP: FastMAD pipeline create FAILED");
+.
+511d
+510a
+        }
+        WARNING_LOG("VP: FastMAD shader compiled, creating pipeline");
+.
+509d
+508a
+        if (!fso) {
+          ERROR_LOG("VP: FastMAD shader compile FAILED");
+.
+505a
+        WARNING_LOG("VP: Adaptive deinterlace pipeline init: compiling FastMAD shader");
+.
+302a
+    INFO_LOG("VP: passthrough vertex shader {}", vso ? "OK" : "FAILED");
+.
+300a
+    INFO_LOG("VP: compiling passthrough vertex shader...");
+.
+281a
+  WARNING_LOG("VP: CompileDisplayPipelines display={} deinterlace={} chroma_smoothing={} mode={}",
+              display, deinterlace, chroma_smoothing, (int)g_gpu_settings.display_deinterlacing_mode);
+.
+241,242d
+218,219d
+217a
+  s_locals.initialized = false;
+.
+211,212d
+210a
+  s_locals.initialized = true;
+  INFO_LOG("VP: Initialize done");
+.
+209a
+  INFO_LOG("VP: CompileDisplayPipelines done");
+.
+206a
+    ERROR_LOG("VP: CompileDisplayPipelines failed: {}", error->GetDescription());
+.
+204a
+  INFO_LOG("VP: CompileDisplayPipelines...");
+.
+203a
+  INFO_LOG("VP: LoadOverlaySettings done");
+.
+201a
+  INFO_LOG("VP: LoadOverlaySettings...");
+.
+191d
+190a
+  return s_locals.initialized;
+.
+177,181d
+173a
 bool VideoPresenter::HasDisplayTexture()
 {
   return s_locals.display_texture != nullptr;
 }
 
 .
-169a
+168a
 const GSVector4i& VideoPresenter::GetVideoActiveRect()
 {
   return s_locals.video_active_rect;
 }
 
 .
-154d
-116d
-75,76d
-64,69d
+153d
+115d
+104a
+  bool initialized = false;
+.
+74,75d
+63,68d
 12d
 7,8d
 wq
 PATCHEND
 # Modify: src/core/video_presenter.h
 ed -s 'src/core/video_presenter.h' <<'PATCHEND'
-99a
+102a
 #endif
 .
-97a
+100a
 #ifdef __LIBRETRO__
 inline void FrameDoneOnVideoThread(u32) {}
 #else
@@ -2086,14 +3344,15 @@ wq
 PATCHEND
 # Modify: src/core/video_thread.cpp
 ed -s 'src/core/video_thread.cpp' <<'PATCHEND'
-1121,1122s/^/  /
-1124,1130s/^/  /
-1135s/^  //
+178,181s/^/  /
+1128,1129s/^/  /
+1131,1137s/^/  /
+1142s/^  //
 1496,1500d
 1292,1293d
 1225,1237d
-1132,1134d
-1130a
+1139,1141d
+1137a
     }
     else
     {
@@ -2105,20 +3364,20 @@ ed -s 'src/core/video_thread.cpp' <<'PATCHEND'
       }
     }
 .
-1120a
+1127a
     if (g_gpu_device)
     {
 .
-1111,1118d
-1042d
-1041a
+1118,1125d
+1049d
+1048a
   if (g_gpu_device && g_gpu_device->HasMainSwapChain())
 .
-1022,1024d
-1000a
+1029,1031d
+1007a
   } // end non-libretro-sw path
 .
-916a
+923a
 #ifdef __LIBRETRO__
   // In libretro with software renderer, skip GPU device creation entirely.
   // Frames are pushed directly from VRAM via the libretro video callback.
@@ -2146,25 +3405,34 @@ ed -s 'src/core/video_thread.cpp' <<'PATCHEND'
 #endif
   {
 .
-830,833d
-784,793d
-756a
+835,838d
+789,798d
+761a
 #endif
 .
-746a
+751a
 #ifndef __LIBRETRO__
 .
-745a
+750a
 #endif
 .
-727a
+732a
 #ifndef __LIBRETRO__
 .
-616a
+615a
 #endif
 .
-588a
+587a
 #ifndef __LIBRETRO__
+.
+181a
+        } while (available_size < size);
+.
+177d
+176a
+      if (available_size < size)
+      {
+        do
 .
 36a
 #endif
@@ -2189,10 +3457,10 @@ inline void OnVideoThreadRunIdleChanged(bool) {}
 inline bool SetScreensaverInhibit(bool, Error*) { return true; }
 #else
 .
-48a
+47a
 #endif
 .
-45a
+44a
 #ifdef __LIBRETRO__
 inline bool StartFullscreenUI(bool fullscreen, Error* error)
 {
@@ -2214,9 +3482,15 @@ PATCHEND
 mkdir -p 'src/goosestation-libretro'
 # Add: src/goosestation-libretro/CMakeLists.txt
 cat > 'src/goosestation-libretro/CMakeLists.txt' <<'PATCHEND'
-add_library(goosestation_libretro SHARED
-  main.cpp
-)
+if(SWITCH)
+  add_library(goosestation_libretro STATIC
+    main.cpp
+  )
+else()
+  add_library(goosestation_libretro SHARED
+    main.cpp
+  )
+endif()
 
 set_target_properties(goosestation_libretro PROPERTIES
   OUTPUT_NAME "goosestation_libretro"
@@ -2245,7 +3519,13 @@ set_target_properties(goosestation_libretro PROPERTIES POSITION_INDEPENDENT_CODE
 
 # Hide all symbols except retro_* to avoid collisions with libvulkan etc.
 # PE/COFF doesn't use version scripts; on Windows RETRO_API uses dllexport.
-if(NOT WIN32)
+if(APPLE)
+  target_link_options(goosestation_libretro PRIVATE
+    "LINKER:-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/link.exp"
+  )
+elseif(SWITCH)
+  # Static archive — RetroArch HBL build links it; no linker script here.
+elseif(NOT WIN32)
   target_link_options(goosestation_libretro PRIVATE
     "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/link.T"
     "LINKER:--no-undefined"
@@ -5449,6 +6729,12 @@ enum retro_hw_render_interface_type
     */
    RETRO_HW_RENDER_INTERFACE_GSKIT_PS2  = 5,
 
+   /**
+    * Indicates a \c retro_hw_render_interface for deko3d (Switch / Tegra X1).
+    * @see retro_hw_render_interface_deko3d
+    */
+   RETRO_HW_RENDER_INTERFACE_DEKO3D     = 6,
+
    /** @private Defined to ensure <tt>sizeof(retro_hw_render_interface_type) == sizeof(int)</tt>.
     * Do not use. */
    RETRO_HW_RENDER_INTERFACE_DUMMY      = INT_MAX
@@ -7383,6 +8669,9 @@ enum retro_hw_context_type
 
    /* Direct3D9, see RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE */
    RETRO_HW_CONTEXT_D3D9             = 10,
+
+   /* deko3d (Switch / Tegra X1), see RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE */
+   RETRO_HW_CONTEXT_DEKO3D           = 11,
 
    /** Dummy value to ensure sizeof(enum retro_hw_context_type) == sizeof(int). Do not use. */
    RETRO_HW_CONTEXT_DUMMY = INT_MAX
@@ -10134,6 +11423,157 @@ RETRO_API size_t retro_get_memory_size(unsigned id);
 #endif
 PATCHEND
 mkdir -p 'src/goosestation-libretro'
+# Add: src/goosestation-libretro/libretro_deko3d.h
+cat > 'src/goosestation-libretro/libretro_deko3d.h' <<'PATCHEND'
+/* Copyright (C) 2010-2026 The RetroArch team
+ *
+ * ---------------------------------------------------------------------------------------------
+ * The following license statement only applies to this libretro API header (libretro_deko3d.h)
+ * ---------------------------------------------------------------------------------------------
+ *
+ * Permission is hereby granted, free of charge,
+ * to any person obtaining a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+ * and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#ifndef LIBRETRO_DEKO3D_H__
+#define LIBRETRO_DEKO3D_H__
+
+#include <libretro.h>
+#include <deko3d.h>
+
+#define RETRO_HW_RENDER_INTERFACE_DEKO3D_VERSION 1
+
+/* The image the core has rendered for this frame.
+ *
+ * `image` is an opaque DkImage initialized by the core. The pointer must
+ * remain valid until retro_video_refresh_t has returned. The frontend
+ * does not take ownership; the frontend will only sample/blit from it.
+ *
+ * The image must be sampleable (bit DkImageFlags_UsageRender |
+ * DkImageFlags_UsageLoadStore is recommended on the core side). Tile-mode
+ * images are fine; the frontend will use dkCmdBufBlitImage which honors
+ * the layout. The image must be in a state safe for sampling at the time
+ * the frontend processes the frame.
+ *
+ * `width` / `height` describe the visible region the core has rendered
+ * inside `image`. The frontend will treat the rest as undefined.
+ *
+ * `src_x` / `src_y` are the top-left offset of the visible region within
+ * `image`. Defaults to 0. Allows the core to expose a sub-rect of a
+ * larger working texture (e.g. a VRAM atlas) without first copying it
+ * to an origin-anchored intermediate.
+ *
+ * `image_width` / `image_height` are the full extent of the underlying
+ * `image`. The frontend uses them with `src_x`/`src_y` to compute the
+ * source rectangle for its blit. If left as 0, the frontend assumes the
+ * core's working texture has no atlas offset and falls back to
+ * `image_width == width` / `image_height == height` (legacy behaviour
+ * for cores written against the v1 interface).
+ *
+ * `display_aspect_ratio` is the intended on-screen aspect ratio (e.g.
+ * 4.0/3.0, 16.0/9.0). 0.0 = let the frontend decide based on width/height. */
+struct retro_deko3d_image
+{
+   const DkImage *image;
+   unsigned width;
+   unsigned height;
+   unsigned src_x;
+   unsigned src_y;
+   unsigned image_width;
+   unsigned image_height;
+   float display_aspect_ratio;
+};
+
+/* Hands the frontend the image the core just rendered, plus optional
+ * synchronization fences.
+ *
+ * If `acquire_fence` is non-NULL, the frontend will wait on this fence
+ * (via dkQueueWaitFence) before the GPU samples `image`. This lets the
+ * core submit its work on a private command buffer that signals the
+ * fence and have the frontend ordered after that submission without an
+ * explicit dkQueueSubmit roundtrip in the core.
+ *
+ * If `release_fence` is non-NULL, the frontend will signal it on its
+ * queue (via dkCmdBufSignalFence flushed before present) once it has
+ * finished reading `image`. The core can wait on this fence before
+ * reusing the image to avoid races.
+ *
+ * Calling set_image with image==NULL is undefined; pass a stale image
+ * pointer if you need duped frames.
+ *
+ * The fences themselves must be valid for the lifetime of the
+ * retro_video_refresh_t call only. */
+typedef void (*retro_deko3d_set_image_t)(void *handle,
+      const struct retro_deko3d_image *image,
+      DkFence *acquire_fence,
+      DkFence *release_fence);
+
+/* The current frame's sync index. Mirrors libretro_vulkan: bit N of
+ * get_sync_index_mask() set means N is a valid index. Cores can use
+ * this to maintain a ring of per-frame resources without stalling. */
+typedef uint32_t (*retro_deko3d_get_sync_index_t)(void *handle);
+typedef uint32_t (*retro_deko3d_get_sync_index_mask_t)(void *handle);
+
+/* CPU-blocking wait until the GPU has finished the work scheduled for
+ * the current sync index. Intended for cleanup paths only — do not call
+ * this every frame. */
+typedef void (*retro_deko3d_wait_sync_index_t)(void *handle);
+
+/* If the core ever submits work to the frontend's DkQueue from any
+ * thread (including the retro_run thread), it must do so under
+ * lock_queue() / unlock_queue(). Submissions are heavyweight; expect
+ * contention if frontend rendering and core rendering serialize. The
+ * preferred path is for the core to submit on its own thread/queue and
+ * use acquire_fence/release_fence in set_image instead. */
+typedef void (*retro_deko3d_lock_queue_t)(void *handle);
+typedef void (*retro_deko3d_unlock_queue_t)(void *handle);
+
+struct retro_hw_render_interface_deko3d
+{
+   /* Must be set to RETRO_HW_RENDER_INTERFACE_DEKO3D. */
+   enum retro_hw_render_interface_type interface_type;
+   /* Must be set to RETRO_HW_RENDER_INTERFACE_DEKO3D_VERSION. */
+   unsigned interface_version;
+
+   /* Opaque handle the core must pass to every function pointer. */
+   void *handle;
+
+   /* The DkDevice the frontend has created. The core MUST use this
+    * device for any GPU work whose results it hands back to the
+    * frontend (set_image image, fences). Allocating a private DkDevice
+    * is permitted but its DkMemBlocks will not be visible to the
+    * frontend. */
+   DkDevice device;
+
+   /* The graphics+compute DkQueue the frontend uses for compositing
+    * and present. The core may submit to this queue (under
+    * lock_queue/unlock_queue) but the recommended path is for the core
+    * to own its own DkQueue and synchronize via fences in set_image. */
+   DkQueue queue;
+
+   retro_deko3d_set_image_t              set_image;
+   retro_deko3d_get_sync_index_t         get_sync_index;
+   retro_deko3d_get_sync_index_mask_t    get_sync_index_mask;
+   retro_deko3d_wait_sync_index_t        wait_sync_index;
+   retro_deko3d_lock_queue_t             lock_queue;
+   retro_deko3d_unlock_queue_t           unlock_queue;
+};
+
+#endif
+PATCHEND
+mkdir -p 'src/goosestation-libretro'
 # Add: src/goosestation-libretro/libretro_opengl_context.h
 cat > 'src/goosestation-libretro/libretro_opengl_context.h' <<'PATCHEND'
 // GooseStation — libretro OpenGL context wrapper
@@ -10693,6 +12133,11 @@ cat > 'src/goosestation-libretro/link.T' <<'PATCHEND'
 };
 PATCHEND
 mkdir -p 'src/goosestation-libretro'
+# Add: src/goosestation-libretro/link.exp
+cat > 'src/goosestation-libretro/link.exp' <<'PATCHEND'
+_retro_*
+PATCHEND
+mkdir -p 'src/goosestation-libretro'
 # Add: src/goosestation-libretro/main.cpp
 cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
 // GooseStation — libretro frontend for DuckStation
@@ -10705,7 +12150,9 @@ cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
 #include "core/controller.h"
 #include "core/core.h"
 #include "core/core_private.h"
+#include "core/cpu_code_cache.h"
 #include "core/cpu_core.h"
+#include "util/page_fault_handler.h"
 #include "core/timing_event.h"
 #include "core/fullscreenui.h"
 #include "core/game_list.h"
@@ -10723,15 +12170,24 @@ cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
 
 #include "util/audio_stream.h"
 #include "util/core_audio_stream.h"
+#ifdef __SWITCH__
+#include "util/deko3d_device.h"
+#include "util/deko3d_texture.h"
+#include "libretro_deko3d.h"
+#endif
 #include "util/gpu_device.h"
 #include "util/imgui_manager.h"
 #include "util/input_manager.h"
+#ifdef ENABLE_OPENGL
 #include "util/opengl_device.h"
 #include "util/opengl_texture.h"
+#endif
 #include "util/translation.h"
 #include "util/window_info.h"
 
+#ifdef ENABLE_OPENGL
 #include "libretro_opengl_context.h"
+#endif
 
 #ifdef ENABLE_VULKAN
 #include "util/vulkan_headers.h"  // must come first — defines VK_NO_PROTOTYPES before vulkan.h
@@ -10746,6 +12202,7 @@ cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
 #include "core/save_state_version.h"
 
 #include "common/assert.h"
+#include "common/memmap.h"
 #include "common/error.h"
 #include "common/file_system.h"
 #include "common/log.h"
@@ -10754,7 +12211,6 @@ cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
 #include "common/task_queue.h"
 #include "common/threading.h"
 #include "common/time_helpers.h"
-#include "common/timer.h"
 
 #include "fmt/format.h"
 
@@ -10764,6 +12220,10 @@ cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
 #include <mutex>
 #include <numeric>
 #include <vector>
+
+#if defined(__SWITCH__) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 LOG_CHANNEL(Host);
 
@@ -10816,6 +12276,10 @@ static bool s_hw_context_valid = false;
 static bool s_deferred_boot_pending = false;
 static std::string s_deferred_boot_path;
 static bool s_context_lost = false;
+#ifdef __SWITCH__
+static bool s_deko3d_hw_path_enabled = false;
+static const retro_hw_render_interface_deko3d* s_deko3d_iface = nullptr;
+#endif
 
 // Display blit resources for HW render
 static GLuint s_display_program = 0;
@@ -10867,12 +12331,23 @@ static void VideoThreadEntryPoint();
 static bool InitializeFoldersAndConfig(Error* error);
 static void UpdateControllers();
 static void UpdateVariables(bool force = false);
+static void SetControllerInfo();
+static void SetInputDescriptors();
 static void PushVideoFrame();
 static void PushHWVideoFrame();
+#ifdef __SWITCH__
+static void PushDeko3DVideoFrame();
+static void PushDeko3DHWVideoFrame();
+static bool SetupDeko3DHWRender();
+static void RETRO_CALLCONV Deko3DHWContextReset();
+static void RETRO_CALLCONV Deko3DHWContextDestroy();
+#endif
 static void PushAudioSamples();
 static void RETRO_CALLCONV HWContextReset();
 static void RETRO_CALLCONV HWContextDestroy();
 static bool SetupHWRender();
+static void CreateDisplayGLResources();
+static void DestroyDisplayGLResources();
 
 #ifdef ENABLE_VULKAN
 static bool SetupVulkanHWRender();
@@ -10891,8 +12366,8 @@ static void EnsureVulkanPresentationImage(u32 width, u32 height);
 // force-4:3-for-24bit internally. The content AR is then content_w/content_h * PAR.
 static float GetDisplayAspectRatioFloat(u32 content_w, u32 content_h)
 {
-  if (g_settings.display_aspect_ratio == DisplayAspectRatio::Stretch())
-    return 0.0f;
+  if (g_settings.gpu_widescreen_hack && g_settings.display_aspect_ratio == DisplayAspectRatio::Auto())
+    return 16.0f / 9.0f;
 
   // FMV zoom: content already cropped to 16:9 by GetFMVCrop.
   if (LibretroHost::s_fmv_zoom_16_9 && g_gpu.IsDisplayAreaColorDepth24())
@@ -11159,15 +12634,12 @@ void Host::CommitBaseSettingChanges()
 {
 }
 
-void Host::LoadSettings(const SettingsInterface& si, std::unique_lock<std::mutex>& lock)
+void Host::OnSettingsReloaded()
 {
-}
-
-void Host::CheckForSettingsChanges(const Settings& old_settings)
-{
-  if (LibretroHost::s_hw_render_enabled &&
-      g_settings.gpu_resolution_scale != old_settings.gpu_resolution_scale)
+  static u32 s_last_resolution_scale = 0;
+  if (LibretroHost::s_hw_render_enabled && g_settings.gpu_resolution_scale != s_last_resolution_scale)
   {
+    s_last_resolution_scale = g_settings.gpu_resolution_scale;
     struct retro_system_av_info avi;
     retro_get_system_av_info(&avi);
     struct retro_game_geometry geom = {};
@@ -11367,7 +12839,9 @@ void LibretroHost::VideoThreadEntryPoint()
 bool LibretroHost::InitializeFoldersAndConfig(Error* error)
 {
   EmuFolders::AppRoot = s_system_directory;
-  EmuFolders::DataRoot = s_save_directory.empty() ? s_system_directory : s_save_directory;
+  // DataRoot anchors all the DuckStation-internal dirs (cheats, covers, gamesettings, etc.)
+  // to the system directory rather than polluting the libretro save directory.
+  EmuFolders::DataRoot = Path::Combine(s_system_directory, "goosestation");
 
   const std::string resources_subpath = Path::Combine(s_system_directory, "duckstation/resources");
   const std::string resources_altpath = Path::Combine(s_system_directory, "duckstation");
@@ -11380,15 +12854,6 @@ bool LibretroHost::InitializeFoldersAndConfig(Error* error)
 
   LibretroLog(RETRO_LOG_INFO, "[GooseStation] Resources: %s (%s)\n", EmuFolders::Resources.c_str(),
               FileSystem::DirectoryExists(EmuFolders::Resources.c_str()) ? "found" : "not found, non-fatal");
-
-  EmuFolders::Bios = s_system_directory;
-
-  if (!s_save_directory.empty())
-  {
-    EmuFolders::MemoryCards = s_save_directory;
-    EmuFolders::SaveStates = s_save_directory;
-    EmuFolders::Cache = Path::Combine(s_save_directory, "cache");
-  }
 
   if (!Core::InitializeBaseSettingsLayer({}, error))
     return false;
@@ -11420,9 +12885,114 @@ bool LibretroHost::InitializeFoldersAndConfig(Error* error)
   si.SetBoolValue("InputSources", "Keyboard", false);
   si.SetBoolValue("InputSources", "Pointer", false);
 
+  // Memory cards are the only thing that belongs in the libretro save directory
+  // (game-specific persistent state, same convention as beetle-psx).
+  // Everything else — cache, cheats, textures, patches, shaders, etc. — stays
+  // under DataRoot = system_dir/goosestation/ via LoadConfig defaults.
+  // Save states, screenshots, and RA-side shaders are managed by RetroArch
+  // itself (retro_serialize / hotkey / shader pipeline) and never written by
+  // the core in libretro mode.
+  if (!s_save_directory.empty())
+    si.SetStringValue("MemoryCards", "Directory", s_save_directory.c_str());
+
   EmuFolders::LoadConfig(si);
 
   return true;
+}
+
+void LibretroHost::SetControllerInfo()
+{
+  if (!s_environment_callback)
+    return;
+
+  static const retro_controller_description s_controllers[] = {
+    {"PlayStation Controller (Digital)", RETRO_DEVICE_JOYPAD},
+    {"PlayStation Controller (DualShock)", RETRO_DEVICE_ANALOG},
+    {"None", RETRO_DEVICE_NONE},
+  };
+
+  static retro_controller_info s_controller_info[NUM_CONTROLLER_AND_CARD_PORTS + 1];
+  for (u32 i = 0; i < NUM_CONTROLLER_AND_CARD_PORTS; i++)
+  {
+    s_controller_info[i].types = s_controllers;
+    s_controller_info[i].num_types = sizeof(s_controllers) / sizeof(s_controllers[0]);
+  }
+  s_controller_info[NUM_CONTROLLER_AND_CARD_PORTS].types = nullptr;
+  s_controller_info[NUM_CONTROLLER_AND_CARD_PORTS].num_types = 0;
+
+  s_environment_callback(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, s_controller_info);
+}
+
+static std::vector<retro_input_descriptor> s_input_descriptors_storage;
+
+void LibretroHost::SetInputDescriptors()
+{
+  if (!s_environment_callback)
+    return;
+
+  std::array<std::string, NUM_CONTROLLER_AND_CARD_PORTS> pad_types;
+  {
+    auto lock = Core::GetSettingsLock();
+    SettingsInterface& si = *Core::GetBaseSettingsLayer();
+    for (u32 port = 0; port < NUM_CONTROLLER_AND_CARD_PORTS; port++)
+    {
+      const TinyString section = TinyString::from_format("Pad{}", port + 1);
+      pad_types[port] = si.GetStringValue(section, "Type", "None");
+    }
+  }
+
+  static const struct
+  {
+    unsigned id;
+    const char* name;
+  } digital_buttons[] = {
+    {RETRO_DEVICE_ID_JOYPAD_UP, "D-Pad Up"},
+    {RETRO_DEVICE_ID_JOYPAD_DOWN, "D-Pad Down"},
+    {RETRO_DEVICE_ID_JOYPAD_LEFT, "D-Pad Left"},
+    {RETRO_DEVICE_ID_JOYPAD_RIGHT, "D-Pad Right"},
+    {RETRO_DEVICE_ID_JOYPAD_B, "Cross"},
+    {RETRO_DEVICE_ID_JOYPAD_A, "Circle"},
+    {RETRO_DEVICE_ID_JOYPAD_Y, "Square"},
+    {RETRO_DEVICE_ID_JOYPAD_X, "Triangle"},
+    {RETRO_DEVICE_ID_JOYPAD_L, "L1"},
+    {RETRO_DEVICE_ID_JOYPAD_R, "R1"},
+    {RETRO_DEVICE_ID_JOYPAD_L2, "L2"},
+    {RETRO_DEVICE_ID_JOYPAD_R2, "R2"},
+    {RETRO_DEVICE_ID_JOYPAD_SELECT, "Select"},
+    {RETRO_DEVICE_ID_JOYPAD_START, "Start"},
+  };
+
+  s_input_descriptors_storage.clear();
+
+  for (u32 port = 0; port < NUM_CONTROLLER_AND_CARD_PORTS; port++)
+  {
+    const std::string& type = pad_types[port];
+    if (type == "None" || type.empty())
+      continue;
+
+    for (const auto& b : digital_buttons)
+      s_input_descriptors_storage.push_back({port, RETRO_DEVICE_JOYPAD, 0, b.id, b.name});
+
+    const bool analog = (type == "AnalogController" || type == "AnalogJoystick");
+    if (analog)
+    {
+      s_input_descriptors_storage.push_back(
+        {port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3, "L3 (Left Stick Click)"});
+      s_input_descriptors_storage.push_back(
+        {port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3, "R3 (Right Stick Click)"});
+      s_input_descriptors_storage.push_back(
+        {port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X, "Left Analog X"});
+      s_input_descriptors_storage.push_back(
+        {port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y, "Left Analog Y"});
+      s_input_descriptors_storage.push_back(
+        {port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X, "Right Analog X"});
+      s_input_descriptors_storage.push_back(
+        {port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y, "Right Analog Y"});
+    }
+  }
+
+  s_input_descriptors_storage.push_back({0, 0, 0, 0, nullptr});
+  s_environment_callback(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, s_input_descriptors_storage.data());
 }
 
 void LibretroHost::UpdateControllers()
@@ -11533,6 +13103,7 @@ void LibretroHost::UpdateVariables(bool force)
   auto lock = Core::GetSettingsLock();
   SettingsInterface& si = *Core::GetBaseSettingsLayer();
   const char* value;
+
 
   // =====================================================================
   // SYSTEM
@@ -11755,11 +13326,20 @@ void LibretroHost::UpdateVariables(bool force)
   // =====================================================================
   // INPUT
   // =====================================================================
+  bool pad_type_changed = false;
   if (GetVariable("goosestation_controller_1_type", &value))
+  {
+    if (si.GetStringValue("Pad1", "Type") != std::string_view(value))
+      pad_type_changed = true;
     si.SetStringValue("Pad1", "Type", value);
+  }
 
   if (GetVariable("goosestation_controller_2_type", &value))
+  {
+    if (si.GetStringValue("Pad2", "Type") != std::string_view(value))
+      pad_type_changed = true;
     si.SetStringValue("Pad2", "Type", value);
+  }
 
   if (GetVariable("goosestation_multitap", &value))
     si.SetStringValue("ControllerPorts", "MultitapMode", value);
@@ -11914,6 +13494,9 @@ void LibretroHost::UpdateVariables(bool force)
   {
     System::ApplySettings(false);
   }
+
+  if (pad_type_changed)
+    SetInputDescriptors();
 }
 
 void LibretroHost::PushVideoFrame()
@@ -12006,6 +13589,293 @@ void LibretroHost::PushVideoFrame()
   s_video_refresh_callback(frame_data, vram_width, cropped_height, vram_width * sizeof(u32));
 }
 
+#ifdef __SWITCH__
+bool LibretroHost::SetupDeko3DHWRender()
+{
+  retro_hw_render_callback cb = {};
+  cb.context_type        = RETRO_HW_CONTEXT_DEKO3D;
+  cb.context_reset       = &LibretroHost::Deko3DHWContextReset;
+  cb.context_destroy     = &LibretroHost::Deko3DHWContextDestroy;
+  cb.bottom_left_origin  = false;
+  if (!s_environment_callback(RETRO_ENVIRONMENT_SET_HW_RENDER, &cb))
+  {
+    LibretroLog(RETRO_LOG_WARN,
+                "[GooseStation] SET_HW_RENDER(DEKO3D) rejected; falling back to CPU readback\n");
+    return false;
+  }
+  s_deko3d_hw_path_enabled = true;
+  // GL/Vulkan setup flips this for their HW paths; mirror it here so every
+  // s_hw_render_enabled-gated branch (av_info, SET_GEOMETRY HW branch,
+  // OnSettingsReloaded scale handler, PushDeko3DHWVideoFrame) sees a
+  // consistent "HW renderer is live" state for the Deko3D direct path too.
+  s_hw_render_enabled = true;
+  LibretroLog(RETRO_LOG_INFO, "[GooseStation] Deko3D HW-direct: SET_HW_RENDER ok, boot deferred to context_reset\n");
+  return true;
+}
+
+void RETRO_CALLCONV LibretroHost::Deko3DHWContextDestroy()
+{
+  LibretroLog(RETRO_LOG_INFO, "[GooseStation] Deko3D HW context destroy\n");
+  s_deko3d_iface = nullptr;
+  s_hw_context_valid = false;
+}
+
+void RETRO_CALLCONV LibretroHost::Deko3DHWContextReset()
+{
+  LibretroLog(RETRO_LOG_INFO, "[GooseStation] Deko3D HW context reset\n");
+
+  retro_hw_render_interface* ri = nullptr;
+  if (!s_environment_callback(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, &ri)
+      || !ri
+      || ri->interface_type    != RETRO_HW_RENDER_INTERFACE_DEKO3D
+      || ri->interface_version != RETRO_HW_RENDER_INTERFACE_DEKO3D_VERSION)
+  {
+    LibretroLog(RETRO_LOG_ERROR, "[GooseStation] Failed to get Deko3D HW render interface\n");
+    s_hw_context_valid = false;
+    return;
+  }
+  s_deko3d_iface = reinterpret_cast<const retro_hw_render_interface_deko3d*>(ri);
+  s_hw_context_valid = true;
+
+  // Hand RA's DkDevice to Deko3DDevice BEFORE BootSystem so the GPU device
+  // we construct borrows it instead of calling dk::DeviceMaker{}.create().
+  Deko3DDevice::SetExternalDevice(s_deko3d_iface->device);
+  LibretroLog(RETRO_LOG_INFO, "[GooseStation] Deko3D HW iface acquired: type=%d version=%u; external device wired\n",
+              (int)s_deko3d_iface->interface_type, s_deko3d_iface->interface_version);
+
+  if (s_deferred_boot_pending)
+  {
+    LibretroHost::UpdateVariables(true);
+
+    SystemBootParameters params;
+    params.path = s_deferred_boot_path;
+
+    Error error;
+    if (!System::BootSystem(std::move(params), &error))
+    {
+      LibretroLog(RETRO_LOG_ERROR, "[GooseStation] BootSystem() failed in Deko3DHWContextReset: %s\n",
+                  error.GetDescription().c_str());
+      s_deferred_boot_pending = false;
+      s_deferred_boot_path.clear();
+      s_hw_context_valid = false;
+      return;
+    }
+    if (System::HasMediaSubImages())
+    {
+      s_disk_control.has_sub_images = true;
+      s_disk_control.image_index = System::GetMediaSubImageIndex();
+      s_disk_control.image_count = System::GetMediaSubImageCount();
+      s_disk_control.image_paths.clear();
+      s_disk_control.image_labels.clear();
+      for (u32 i = 0; i < s_disk_control.image_count; i++)
+      {
+        s_disk_control.image_paths.push_back(s_deferred_boot_path);
+        s_disk_control.image_labels.push_back(System::GetMediaSubImageTitle(i));
+      }
+    }
+
+    s_deferred_boot_pending = false;
+    s_deferred_boot_path.clear();
+    s_game_loaded = true;
+    LibretroLog(RETRO_LOG_INFO, "[GooseStation] Deferred boot completed under shared Deko3D device\n");
+  }
+}
+
+void LibretroHost::PushDeko3DHWVideoFrame()
+{
+  if (!s_video_refresh_callback || !g_gpu_device
+      || g_gpu_device->GetRenderAPI() != RenderAPI::Deko3D)
+    return;
+
+  if (!s_deko3d_iface)
+  {
+    s_video_refresh_callback(nullptr,
+                             s_last_geometry_width  ? s_last_geometry_width  : 320,
+                             s_last_geometry_height ? s_last_geometry_height : 240,
+                             0);
+    return;
+  }
+
+  if (g_gpu.IsDisplayDisabled() || !VideoPresenter::HasDisplayTexture())
+  {
+    // Pass RETRO_HW_FRAME_BUFFER_VALID (not nullptr) so RA's dk3d_frame
+    // re-presents the previous set_image instead of clearing the swapchain
+    // to black. Without this, transient display-disable states in the PSX
+    // GPU (which happen routinely between scenes / during transitions /
+    // mid-frame for some titles) cause visible black flashes — the
+    // "consistently dropped frames" symptom. dk3d->hw_image is still the
+    // last valid image because we never called set_image with nullptr.
+    s_video_refresh_callback(RETRO_HW_FRAME_BUFFER_VALID,
+                             s_last_geometry_width  ? s_last_geometry_width  : 320,
+                             s_last_geometry_height ? s_last_geometry_height : 240,
+                             0);
+    return;
+  }
+
+  GPUTexture* const display_texture = VideoPresenter::GetDisplayTexture();
+  const GSVector4i display_rect     = VideoPresenter::GetDisplayTextureRect();
+  const u32 width  = static_cast<u32>(display_rect.z - display_rect.x);
+  const u32 height = static_cast<u32>(display_rect.w - display_rect.y);
+  if (width == 0 || height == 0 || !display_texture)
+  {
+    s_video_refresh_callback(nullptr, 320, 240, 0);
+    return;
+  }
+
+  auto* dk_device = static_cast<Deko3DDevice*>(g_gpu_device.get());
+
+  // Capture the current frame index BEFORE submit — after SubmitCommandBuffer
+  // advances the ring, the fence at this index represents THIS frame's GPU work.
+  const u32 submit_idx = dk_device->GetCurrentFrameIndex();
+
+  // Bidirectional fence handshake (paired with RA's dkCmdBufSignalFence on the
+  // release_fence we pass below). Queue a GPU-side wait on the PREVIOUS slot's
+  // release fence so the next PSX render can't overwrite an atlas RA is still
+  // sampling. GPU-side wait → no CPU stall; in steady state the signal lands
+  // before the wait is reached. First rotation skips the wait (valid==false).
+  // Fixes the periodic black/ghost flicker seen with downscale OFF, where RA
+  // samples directly from the live scaled-VRAM atlas.
+  {
+    const u32 prev_slot = (submit_idx + Deko3DDevice::NUM_COMMAND_BUFFERS - 1) %
+                          Deko3DDevice::NUM_COMMAND_BUFFERS;
+    if (dk_device->IsReleaseFenceValid(prev_slot))
+      dkQueueWaitFence(dk_device->GetDkQueue(), dk_device->GetReleaseFence(prev_slot));
+  }
+
+  dk_device->SubmitCommandBuffer(false);
+  {
+    const Deko3DTexture* const dk_tex = static_cast<const Deko3DTexture*>(display_texture);
+    retro_deko3d_image img = {};
+    img.image                = &dk_tex->GetImage();
+    img.width                = width;
+    img.height               = height;
+    img.src_x                = static_cast<unsigned>(display_rect.x);
+    img.src_y                = static_cast<unsigned>(display_rect.y);
+    img.image_width          = dk_tex->GetWidth();
+    img.image_height         = dk_tex->GetHeight();
+    img.display_aspect_ratio = 0.0f;
+    s_deko3d_iface->set_image(s_deko3d_iface->handle, &img,
+                              dk_device->GetFrameFence(submit_idx),
+                              dk_device->GetReleaseFence(submit_idx));
+    dk_device->MarkReleaseFenceValid(submit_idx);
+    const unsigned cb_w = s_last_geometry_width  ? s_last_geometry_width  : 320;
+    const unsigned cb_h = s_last_geometry_height ? s_last_geometry_height : 240;
+    s_video_refresh_callback(RETRO_HW_FRAME_BUFFER_VALID, cb_w, cb_h, 0);
+  }
+}
+
+void LibretroHost::PushDeko3DVideoFrame()
+{
+  if (!s_video_refresh_callback || !g_gpu_device)
+    return;
+
+  {
+    static u32 skip_count = 0;
+    static u32 last_log = 0;
+    const bool disp_off = g_gpu.IsDisplayDisabled();
+    const bool no_tex = !VideoPresenter::HasDisplayTexture();
+    if (disp_off || no_tex)
+    {
+      ++skip_count;
+      if (skip_count - last_log >= 60)
+      {
+        WARNING_LOG("PushFrame skipped {}x (disp_off={} no_tex={})", skip_count - last_log, disp_off, no_tex);
+        last_log = skip_count;
+      }
+      s_video_refresh_callback(nullptr, s_last_geometry_width ? s_last_geometry_width : 320,
+                               s_last_geometry_height ? s_last_geometry_height : 240,
+                               (s_last_geometry_width ? s_last_geometry_width : 320) * sizeof(u32));
+      return;
+    }
+  }
+
+  GPUTexture* const display_texture = VideoPresenter::GetDisplayTexture();
+  GSVector4i display_rect = VideoPresenter::GetDisplayTextureRect();
+  u32 width = static_cast<u32>(display_rect.z - display_rect.x);
+  u32 height = static_cast<u32>(display_rect.w - display_rect.y);
+  if (width == 0 || height == 0)
+  {
+    s_video_refresh_callback(nullptr, 320, 240, 320 * sizeof(u32));
+    return;
+  }
+
+  const GPUTextureFormat tex_format = display_texture->GetFormat();
+  // Libretro pixel format is XRGB8888 (memory order B,G,R,A) — only BGRA8 maps
+  // 1:1 without channel/byte conversion. RGBA8 from the GPU would need a swap.
+  if (tex_format != GPUTextureFormat::BGRA8)
+  {
+    static bool warned = false;
+    if (!warned)
+    {
+      WARNING_LOG("Deko3D display texture is {}, expected BGRA8 — colors may swap",
+                  GPUTexture::GetFormatName(tex_format));
+      warned = true;
+    }
+  }
+
+  const auto [crop_top, crop_bottom] = GetFMVCrop(width, height);
+  const u32 src_x = static_cast<u32>(display_rect.x);
+  const u32 src_y = static_cast<u32>(display_rect.y) + crop_top;
+  const u32 cropped_height = height - crop_top - crop_bottom;
+
+  // Absorb PSX interlaced-scanline jitter so RA doesn't realloc GL upload
+  // texture. Threshold matches the SET_GEOMETRY filter in retro_run.
+  static u32 s_last_push_w = 0;
+  static u32 s_last_push_h = 0;
+  {
+    const u32 h_delta = cropped_height > s_last_push_h ? cropped_height - s_last_push_h
+                                                       : s_last_push_h - cropped_height;
+    if (width != s_last_push_w || h_delta > 8 || s_last_push_w == 0)
+    {
+      s_last_push_w = width;
+      s_last_push_h = cropped_height;
+    }
+  }
+  const u32 push_w = s_last_push_w;
+  const u32 push_h = s_last_push_h;
+  const u32 push_pitch = push_w * sizeof(u32);
+
+  s_video_framebuffer.resize(static_cast<size_t>(push_w) * push_h);
+
+  std::unique_ptr<GPUDownloadTexture> dltex;
+  if (g_gpu_device->GetFeatures().memory_import)
+  {
+    dltex = g_gpu_device->CreateDownloadTexture(push_w, push_h, tex_format, s_video_framebuffer.data(),
+                                                s_video_framebuffer.size() * sizeof(u32), push_pitch);
+  }
+  if (!dltex)
+    dltex = g_gpu_device->CreateDownloadTexture(push_w, push_h, tex_format);
+  if (!dltex)
+  {
+    ERROR_LOG("CreateDownloadTexture failed for {}x{}", push_w, push_h);
+    s_video_refresh_callback(nullptr, push_w, push_h, push_pitch);
+    return;
+  }
+  dltex->CopyFromTexture(0, 0, display_texture, src_x, src_y, width, cropped_height, 0, 0, !dltex->IsImported());
+  if (!dltex->ReadTexels(0, 0, width, cropped_height, s_video_framebuffer.data(), push_pitch))
+  {
+    ERROR_LOG("ReadTexels failed for {}x{}", width, cropped_height);
+    s_video_refresh_callback(nullptr, push_w, push_h, push_pitch);
+    return;
+  }
+
+#ifdef __SWITCH__
+  // RGBA8 GPU storage → XRGB8888 libretro: swap R↔B in uint32.
+  {
+    u32* pixels = reinterpret_cast<u32*>(s_video_framebuffer.data());
+    const u32 count = width * cropped_height;
+    for (u32 i = 0; i < count; ++i)
+    {
+      const u32 v = pixels[i];
+      pixels[i] = (v & 0xFF00FF00u) | ((v & 0x00FF0000u) >> 16) | ((v & 0x000000FFu) << 16);
+    }
+  }
+#endif
+
+  s_video_refresh_callback(s_video_framebuffer.data(), push_w, push_h, push_pitch);
+}
+#endif
+
 void LibretroHost::PushAudioSamples()
 {
   if (!s_audio_sample_batch_callback)
@@ -12031,7 +13901,7 @@ void LibretroHost::PushAudioSamples()
 bool LibretroHost::SetupHWRender()
 {
   s_hw_render_callback = {};
-#ifdef __ANDROID__
+#if defined(__ANDROID__)
   s_hw_render_callback.context_type = RETRO_HW_CONTEXT_OPENGLES3;
   s_hw_render_callback.version_major = 3;
   s_hw_render_callback.version_minor = 0;
@@ -12045,7 +13915,10 @@ bool LibretroHost::SetupHWRender()
   s_hw_render_callback.bottom_left_origin = true;
   s_hw_render_callback.depth = true;
   s_hw_render_callback.stencil = true;
-  s_hw_render_callback.cache_context = true;
+  // cache_context = false: frontend may destroy and recreate the GL context
+  // (e.g. fullscreen toggle on macOS Cocoa GL). We must release GPU resources
+  // in HWContextDestroy and recreate them in HWContextReset.
+  s_hw_render_callback.cache_context = false;
 
   if (!s_environment_callback(RETRO_ENVIRONMENT_SET_HW_RENDER, &s_hw_render_callback))
   {
@@ -12057,6 +13930,121 @@ bool LibretroHost::SetupHWRender()
   LibretroLog(RETRO_LOG_INFO, "[GooseStation] HW render context negotiated (OpenGL 3.3 Core)\n");
   s_hw_render_enabled = true;
   return true;
+}
+
+void LibretroHost::CreateDisplayGLResources()
+{
+#ifdef __ANDROID__
+  const char* vs_src = R"(#version 300 es
+precision highp float;
+uniform vec4 u_src_rect;
+out vec2 v_tex0;
+void main() {
+vec2 pos = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+v_tex0 = u_src_rect.xy + pos * u_src_rect.zw;
+gl_Position = vec4(pos * vec2(2.0f, -2.0f) + vec2(-1.0f, 1.0f), 0.0f, 1.0f);
+}
+)";
+  const char* fs_src = R"(#version 300 es
+precision highp float;
+uniform sampler2D samp0;
+in vec2 v_tex0;
+out vec4 o_col0;
+void main() {
+o_col0 = vec4(texture(samp0, v_tex0).rgb, 1.0);
+}
+)";
+#else
+  const char* vs_src = R"(
+    #version 330 core
+    uniform vec4 u_src_rect;
+    out vec2 v_tex0;
+    void main() {
+      vec2 pos = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+      v_tex0 = u_src_rect.xy + pos * u_src_rect.zw;
+      gl_Position = vec4(pos * vec2(2.0f, -2.0f) + vec2(-1.0f, 1.0f), 0.0f, 1.0f);
+    }
+  )";
+  const char* fs_src = R"(
+    #version 330 core
+    uniform sampler2D samp0;
+    in vec2 v_tex0;
+    out vec4 o_col0;
+    void main() {
+      o_col0 = vec4(texture(samp0, v_tex0).rgb, 1.0);
+    }
+  )";
+#endif
+  GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+  glShaderSource(vs, 1, &vs_src, nullptr);
+  glCompileShader(vs);
+  GLint compile_status = 0;
+  glGetShaderiv(vs, GL_COMPILE_STATUS, &compile_status);
+  if (!compile_status)
+  {
+    GLint len = 0;
+    glGetShaderiv(vs, GL_INFO_LOG_LENGTH, &len);
+    std::string log(len, '\0');
+    glGetShaderInfoLog(vs, len, &len, log.data());
+    LibretroLog(RETRO_LOG_ERROR, "[GooseStation] VS compile failed: %s", log.c_str());
+  }
+
+  GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+  glShaderSource(fs, 1, &fs_src, nullptr);
+  glCompileShader(fs);
+  s_display_program = glCreateProgram();
+  glAttachShader(s_display_program, vs);
+  glAttachShader(s_display_program, fs);
+#ifndef __ANDROID__
+  glBindFragDataLocation(s_display_program, 0, "o_col0");
+#endif
+  glLinkProgram(s_display_program);
+
+  GLint link_status = 0;
+  glGetProgramiv(s_display_program, GL_LINK_STATUS, &link_status);
+  if (!link_status)
+  {
+    GLint len = 0;
+    glGetProgramiv(s_display_program, GL_INFO_LOG_LENGTH, &len);
+    std::string log(len, '\0');
+    glGetProgramInfoLog(s_display_program, len, &len, log.data());
+    LibretroLog(RETRO_LOG_ERROR, "[GooseStation] Display program link failed: %s", log.c_str());
+  }
+
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+  s_display_uniform_src_rect = glGetUniformLocation(s_display_program, "u_src_rect");
+  glUseProgram(s_display_program);
+  GLint samp_loc = glGetUniformLocation(s_display_program, "samp0");
+  if (samp_loc >= 0)
+    glUniform1i(samp_loc, 0);
+  glUseProgram(0);
+  glGenVertexArrays(1, &s_display_vao);
+
+  glGenSamplers(1, &s_display_nearest_sampler);
+  glSamplerParameteri(s_display_nearest_sampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glSamplerParameteri(s_display_nearest_sampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glSamplerParameteri(s_display_nearest_sampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glSamplerParameteri(s_display_nearest_sampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+void LibretroHost::DestroyDisplayGLResources()
+{
+  if (s_display_program)
+  {
+    glDeleteProgram(s_display_program);
+    s_display_program = 0;
+  }
+  if (s_display_vao)
+  {
+    glDeleteVertexArrays(1, &s_display_vao);
+    s_display_vao = 0;
+  }
+  if (s_display_nearest_sampler)
+  {
+    glDeleteSamplers(1, &s_display_nearest_sampler);
+    s_display_nearest_sampler = 0;
+  }
 }
 
 void RETRO_CALLCONV LibretroHost::HWContextReset()
@@ -12112,102 +14100,27 @@ void RETRO_CALLCONV LibretroHost::HWContextReset()
       s_last_aspect_ratio = avi.geometry.aspect_ratio;
     }
 
-    {
-#ifdef __ANDROID__
-      const char* vs_src = R"(#version 300 es
-precision highp float;
-uniform vec4 u_src_rect;
-out vec2 v_tex0;
-void main() {
-vec2 pos = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
-v_tex0 = u_src_rect.xy + pos * u_src_rect.zw;
-gl_Position = vec4(pos * vec2(2.0f, -2.0f) + vec2(-1.0f, 1.0f), 0.0f, 1.0f);
-}
-)";
-      const char* fs_src = R"(#version 300 es
-precision highp float;
-uniform sampler2D samp0;
-in vec2 v_tex0;
-out vec4 o_col0;
-void main() {
-o_col0 = vec4(texture(samp0, v_tex0).rgb, 1.0);
-}
-)";
-#else
-      const char* vs_src = R"(
-        #version 330 core
-        uniform vec4 u_src_rect;
-        out vec2 v_tex0;
-        void main() {
-          vec2 pos = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
-          v_tex0 = u_src_rect.xy + pos * u_src_rect.zw;
-          gl_Position = vec4(pos * vec2(2.0f, -2.0f) + vec2(-1.0f, 1.0f), 0.0f, 1.0f);
-        }
-      )";
-      const char* fs_src = R"(
-        #version 330 core
-        uniform sampler2D samp0;
-        in vec2 v_tex0;
-        out vec4 o_col0;
-        void main() {
-          o_col0 = vec4(texture(samp0, v_tex0).rgb, 1.0);
-        }
-      )";
-#endif
-      GLuint vs = glCreateShader(GL_VERTEX_SHADER);
-      glShaderSource(vs, 1, &vs_src, nullptr);
-      glCompileShader(vs);
-      GLint compile_status = 0;
-      glGetShaderiv(vs, GL_COMPILE_STATUS, &compile_status);
-      if (!compile_status)
-      {
-        GLint len = 0;
-        glGetShaderiv(vs, GL_INFO_LOG_LENGTH, &len);
-        std::string log(len, '\0');
-        glGetShaderInfoLog(vs, len, &len, log.data());
-        LibretroLog(RETRO_LOG_ERROR, "[GooseStation] VS compile failed: %s", log.c_str());
-      }
-
-      GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
-      glShaderSource(fs, 1, &fs_src, nullptr);
-      glCompileShader(fs);
-      s_display_program = glCreateProgram();
-      glAttachShader(s_display_program, vs);
-      glAttachShader(s_display_program, fs);
-#ifndef __ANDROID__
-      glBindFragDataLocation(s_display_program, 0, "o_col0");
-#endif
-      glLinkProgram(s_display_program);
-
-      GLint link_status = 0;
-      glGetProgramiv(s_display_program, GL_LINK_STATUS, &link_status);
-      if (!link_status)
-      {
-        GLint len = 0;
-        glGetProgramiv(s_display_program, GL_INFO_LOG_LENGTH, &len);
-        std::string log(len, '\0');
-        glGetProgramInfoLog(s_display_program, len, &len, log.data());
-        LibretroLog(RETRO_LOG_ERROR, "[GooseStation] Display program link failed: %s", log.c_str());
-      }
-
-      glDeleteShader(vs);
-      glDeleteShader(fs);
-      s_display_uniform_src_rect = glGetUniformLocation(s_display_program, "u_src_rect");
-      glUseProgram(s_display_program);
-      GLint samp_loc = glGetUniformLocation(s_display_program, "samp0");
-      if (samp_loc >= 0)
-        glUniform1i(samp_loc, 0);
-      glUseProgram(0);
-      glGenVertexArrays(1, &s_display_vao);
-    }
-
-    glGenSamplers(1, &s_display_nearest_sampler);
-    glSamplerParameteri(s_display_nearest_sampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glSamplerParameteri(s_display_nearest_sampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glSamplerParameteri(s_display_nearest_sampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glSamplerParameteri(s_display_nearest_sampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    CreateDisplayGLResources();
 
     LibretroLog(RETRO_LOG_INFO, "[GooseStation] HW render: game booted successfully\n");
+  }
+  else if (s_context_lost)
+  {
+    LibretroLog(RETRO_LOG_INFO, "[GooseStation] Recreating GPU backend after GL context loss...\n");
+    s_context_lost = false;
+
+    CreateDisplayGLResources();
+
+    Error error;
+    if (!VideoThread::CreateGPUBackend(g_settings.gpu_renderer, true, std::nullopt, &error))
+    {
+      LibretroLog(RETRO_LOG_ERROR, "[GooseStation] Failed to recreate GPU backend: %s\n",
+                  error.GetDescription().c_str());
+      return;
+    }
+
+    g_gpu.UpdateDisplay(false);
+    LibretroLog(RETRO_LOG_INFO, "[GooseStation] GPU backend recreated after GL context loss\n");
   }
 }
 
@@ -12216,26 +14129,19 @@ void RETRO_CALLCONV LibretroHost::HWContextDestroy()
   LibretroLog(RETRO_LOG_INFO, "[GooseStation] HW context destroyed\n");
   s_hw_context_valid = false;
 
-  if (s_display_program)
-  {
-    glDeleteProgram(s_display_program);
-    s_display_program = 0;
-  }
-  if (s_display_vao)
-  {
-    glDeleteVertexArrays(1, &s_display_vao);
-    s_display_vao = 0;
-  }
-  if (s_display_nearest_sampler)
-  {
-    glDeleteSamplers(1, &s_display_nearest_sampler);
-    s_display_nearest_sampler = 0;
-  }
+  DestroyDisplayGLResources();
 
-  if (g_gpu_device)
+  if (g_gpu_device && System::IsValid())
   {
-    if (System::IsValid())
-      System::ShutdownSystem(false);
+    // Destroy GPU backend only — keep system (CPU, memory) alive so we can
+    // recreate the backend when context_reset fires after fullscreen toggle.
+    VideoThread::DestroyGPUBackend();
+    s_context_lost = true;
+    LibretroLog(RETRO_LOG_INFO, "[GooseStation] GPU backend destroyed, system kept alive for context restore\n");
+  }
+  else if (g_gpu_device)
+  {
+    System::ShutdownSystem(false);
   }
 }
 
@@ -12368,9 +14274,19 @@ static bool RETRO_CALLCONV VulkanCreateDevice(struct retro_vulkan_context* conte
   queue_ci.queueCount = 1;
   queue_ci.pQueuePriorities = &queue_priority;
 
+  // Query all features supported by the device and enable them.
+  // RetroArch's required_features is a subset; we need everything the GPU supports
+  // (dualSrcBlend, fragmentStoresAndAtomics, etc.) for correct rendering.
   VkPhysicalDeviceFeatures device_features = {};
+  vkGetPhysicalDeviceFeatures(gpu, &device_features);
+  // Merge in any RetroArch-required features (should be a subset, but just in case).
   if (required_features)
-    device_features = *required_features;
+  {
+    const auto* req = reinterpret_cast<const VkBool32*>(required_features);
+    auto* dst = reinterpret_cast<VkBool32*>(&device_features);
+    for (size_t i = 0; i < sizeof(VkPhysicalDeviceFeatures) / sizeof(VkBool32); i++)
+      dst[i] |= req[i];
+  }
 
   VkDeviceCreateInfo device_ci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
   device_ci.queueCreateInfoCount = 1;
@@ -12954,6 +14870,8 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
   // Check for input bitmask support
   LibretroHost::s_supports_input_bitmasks = cb(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS, nullptr);
 
+  LibretroHost::SetControllerInfo();
+
   // Core option categories
   static retro_core_option_v2_category s_option_categories[] = {
     {"system", "System", "Console region, CPU, and emulation behavior."},
@@ -13106,15 +15024,23 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
       "goosestation_renderer", "GPU Renderer (Restart)", "Renderer",
       "Selects the backend to use for rendering the console/game visuals. Changing this requires restarting the core.",
       nullptr, "video",
-      {{"Software", "Software"}, {"OpenGL", "OpenGL"}, {"Vulkan", "Vulkan"}, {nullptr, nullptr}},
+      {{"Software", "Software"}, {"OpenGL", "OpenGL"}, {"Vulkan", "Vulkan"},
+#ifdef __SWITCH__
+       {"Deko3D", "Deko3D"},
+#endif
+       {nullptr, nullptr}},
       "Software"
     },
     {
       "goosestation_resolution_scale", "Internal Resolution Scale", "Resolution Scale",
       "Upscales the game's rendering by the specified multiplier. Only applies to hardware renderers.",
       nullptr, "video",
-      {{"1", "1x (Native)"}, {"2", "2x"}, {"3", "3x"}, {"4", "4x"}, {"5", "5x"}, {"6", "6x"}, {"7", "7x"}, {"8", "8x"}, {"9", "9x"}, {"10", "10x"}, {"11", "11x"}, {"12", "12x"}, {"13", "13x"}, {"14", "14x"}, {"15", "15x"}, {"16", "16x"}, {nullptr, nullptr}},
-      "1"
+      #ifdef __SWITCH__
+	      {{"1", "1x (Native)"}, {"2", "2x"}, {"3", "3x"}, {"4", "4x"}, {"5", "5x"}, {"6", "6x"}, {"7", "7x"}, {"8", "8x"}, {nullptr, nullptr}}
+      #else
+	      {{"1", "1x (Native)"}, {"2", "2x"}, {"3", "3x"}, {"4", "4x"}, {"5", "5x"}, {"6", "6x"}, {"7", "7x"}, {"8", "8x"}, {"9", "9x"}, {"10", "10x"}, {"11", "11x"}, {"12", "12x"}, {"13", "13x"}, {"14", "14x"}, {"15", "15x"}, {"16", "16x"}, {nullptr, nullptr}}
+      #endif
+      ,"1"
     },
     {
       "goosestation_gpu_multisamples", "Multisample Antialiasing", "MSAA",
@@ -13345,7 +15271,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
       "goosestation_aspect_ratio", "Aspect Ratio", "Aspect Ratio",
       "Display aspect ratio. Auto uses the game's native ratio.",
       nullptr, "display",
-      {{"Auto (Game Native)", "Auto (Game Native)"}, {"4:3", "4:3"}, {"16:9", "16:9"}, {"16:10", "16:10"}, {"19:9", "19:9"}, {"20:9", "20:9"}, {"21:9", "21:9"}, {"32:9", "32:9"}, {"2:1", "2:1"}, {"1:1", "1:1"}, {"5:4", "5:4"}, {"3:2", "3:2"}, {"PAR 1:1", "Pixel Aspect 1:1"}, {"Stretch To Fill", "Stretch To Fill"}, {nullptr, nullptr}},
+      {{"Auto (Game Native)", "Auto (Game Native)"}, {"4:3", "4:3"}, {"16:9", "16:9"}, {"16:10", "16:10"}, {"19:9", "19:9"}, {"20:9", "20:9"}, {"21:9", "21:9"}, {"32:9", "32:9"}, {"2:1", "2:1"}, {"1:1", "1:1"}, {"5:4", "5:4"}, {"3:2", "3:2"}, {"PAR 1:1", "Pixel Aspect 1:1"}, {nullptr, nullptr}},
       "Auto (Game Native)"
     },
     {
@@ -13893,13 +15819,23 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     return true;
   };
   disk_control.set_initial_image = [](unsigned index, const char* path) -> bool {
+    // Store the index so get_image_index() returns the right value during
+    // disk_control_verify_initial_index, which runs before context_reset.
+    LibretroHost::s_disk_control.image_index = index;
     return true;
   };
   disk_control.get_image_path = [](unsigned index, char* path, size_t len) -> bool {
-    if (index >= LibretroHost::s_disk_control.image_count)
-      return false;
-    StringUtil::Strlcpy(path, LibretroHost::s_disk_control.image_paths[index], len);
-    return true;
+    if (index < LibretroHost::s_disk_control.image_count)
+    {
+      StringUtil::Strlcpy(path, LibretroHost::s_disk_control.image_paths[index], len);
+      return true;
+    }
+    if (!LibretroHost::s_deferred_boot_path.empty())
+    {
+      StringUtil::Strlcpy(path, LibretroHost::s_deferred_boot_path, len);
+      return true;
+    }
+    return false;
   };
   disk_control.get_image_label = [](unsigned index, char* label, size_t len) -> bool {
     if (index >= LibretroHost::s_disk_control.image_count)
@@ -13962,6 +15898,7 @@ RETRO_API void retro_init(void)
     LibretroLog(RETRO_LOG_ERROR, "[GooseStation] ProcessStartup() failed: %s\n", error.GetDescription().c_str());
     return;
   }
+  LibretroHost::s_system_initialized = true;
 
   if (!LibretroHost::InitializeFoldersAndConfig(&error))
   {
@@ -14038,19 +15975,22 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info)
 {
   std::memset(info, 0, sizeof(*info));
 
-  const u32 resolution_scale =
-    (LibretroHost::s_hw_render_enabled && System::IsValid()) ? g_settings.gpu_resolution_scale : 1;
-
+  // base_width/height are the PSX *native* active dims. With HW-direct present
+  // (deko3d set_image), the internal-resolution upscale lives inside the HW
+  // image and is invisible to RA — same shape as a replacement-texture core
+  // handing a high-res atlas for a native-res base. Reporting upscaled dims
+  // here makes RA stats scale_x = vp.width / base_width invert to <1 and
+  // truncate to 0.
   if (System::IsValid() && !g_gpu.IsDisplayDisabled())
   {
     const GSVector4i active_rect = VideoPresenter::GetVideoActiveRect();
-    info->geometry.base_width = static_cast<unsigned>(active_rect.z - active_rect.x) * resolution_scale;
-    info->geometry.base_height = static_cast<unsigned>(active_rect.w - active_rect.y) * resolution_scale;
+    info->geometry.base_width = static_cast<unsigned>(active_rect.z - active_rect.x);
+    info->geometry.base_height = static_cast<unsigned>(active_rect.w - active_rect.y);
   }
   else
   {
-    info->geometry.base_width = 320 * resolution_scale;
-    info->geometry.base_height = 240 * resolution_scale;
+    info->geometry.base_width = 320;
+    info->geometry.base_height = 240;
   }
 
   // RA's gl driver rounds both max_width and max_height to the next power of two and
@@ -14060,6 +16000,10 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info)
   // the POT rounding is per-dimension before the squaring.
 #ifdef __ANDROID__
   static constexpr unsigned MAX_SCALE = 8;
+#elif defined(__SWITCH__)
+  // GL/Mesa 20.1 OOMs at >4x (square POT FBO, 16384^2*8B=2GB). Deko3d HW path
+  // has no RA FBO; cap at 8x (8192×4096) instead.
+  const unsigned MAX_SCALE = LibretroHost::s_deko3d_hw_path_enabled ? 8u : 4u;
 #else
   static constexpr unsigned MAX_SCALE = 16;
 #endif
@@ -14078,9 +16022,6 @@ RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device)
   if (port >= NUM_CONTROLLER_AND_CARD_PORTS)
     return;
 
-  const auto lock = Core::GetSettingsLock();
-  SettingsInterface& si = *Core::GetBaseSettingsLayer();
-
   ControllerType type = ControllerType::None;
   switch (device)
   {
@@ -14098,11 +16039,17 @@ RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device)
       break;
   }
 
-  const TinyString section = TinyString::from_format("Pad{}", port + 1);
-  si.SetStringValue(section, "Type", Controller::GetControllerInfo(type).name);
+  {
+    auto lock = Core::GetSettingsLock();
+    SettingsInterface& si = *Core::GetBaseSettingsLayer();
+    const TinyString section = TinyString::from_format("Pad{}", port + 1);
+    si.SetStringValue(section, "Type", Controller::GetControllerInfo(type).name);
+  }
 
   if (System::IsValid())
     System::UpdateControllerSettings();
+
+  LibretroHost::SetInputDescriptors();
 }
 
 RETRO_API void retro_reset(void)
@@ -14129,7 +16076,9 @@ RETRO_API void retro_run(void)
     System::PauseSystem(false);
 
   // Invalidate cached GL state and sync to zeros (RetroArch clobbers state between frames).
+  // Skip for Deko3D — there's no GL context to operate on.
   if (LibretroHost::s_hw_render_enabled && g_gpu_device
+      && g_gpu_device->GetRenderAPI() != RenderAPI::Deko3D
 #ifdef ENABLE_VULKAN
       && !LibretroHost::s_using_vulkan_renderer
 #endif
@@ -14154,7 +16103,9 @@ RETRO_API void retro_run(void)
   const bool display_disabled_after = g_gpu.IsDisplayDisabled();
 
   {
-    const u32 scale = LibretroHost::s_hw_render_enabled ? g_settings.gpu_resolution_scale : 1;
+    // SET_GEOMETRY base dims are PSX-native for HW direct present (upscale is
+    // baked into the HW image and reported separately via set_image extents);
+    // SW readback path uses real buffer dims since the buffer IS the frame.
     u32 content_w, content_h;
     if (!display_disabled_after)
     {
@@ -14163,11 +16114,12 @@ RETRO_API void retro_run(void)
         // HW renderers read from VideoPresenter's snapshot — SET_GEOMETRY must
         // use the same snapshot the HW push will read.
         const GSVector4i active_rect = VideoPresenter::GetVideoActiveRect();
-        content_w = static_cast<u32>(active_rect.z - active_rect.x) * scale;
-        content_h = static_cast<u32>(active_rect.w - active_rect.y) * scale;
+        content_w = static_cast<u32>(active_rect.z - active_rect.x);
+        content_h = static_cast<u32>(active_rect.w - active_rect.y);
       }
       else
       {
+#ifndef __SWITCH__
         // Software pushes the VRAM source rect verbatim — SET_GEOMETRY must
         // match those exact dims or RA reinterprets the buffer width.
         const GSVector4i vsrc = g_gpu.GetCRTCVRAMSourceRect();
@@ -14180,12 +16132,40 @@ RETRO_API void retro_run(void)
         }
         content_w = std::min(vw, static_cast<u32>(VRAM_WIDTH));
         content_h = std::min(vh, static_cast<u32>(VRAM_HEIGHT));
+#else
+        if (g_gpu_device && g_gpu_device->GetRenderAPI() == RenderAPI::Deko3D)
+        {
+          // Same source as PushDeko3DVideoFrame so SET_GEOMETRY and push
+          // always agree. Filter below absorbs PSX scanline jitter.
+          const GSVector4i r = VideoPresenter::GetDisplayTextureRect();
+          content_w = static_cast<u32>(r.z - r.x);
+          content_h = static_cast<u32>(r.w - r.y);
+          if (content_w == 0 || content_h == 0)
+          {
+            content_w = 320;
+            content_h = 240;
+          }
+        }
+        else
+        {
+          const GSVector4i vsrc = g_gpu.GetCRTCVRAMSourceRect();
+          u32 vw = static_cast<u32>(vsrc.z - vsrc.x);
+          u32 vh = static_cast<u32>(vsrc.w - vsrc.y);
+          if (vw == 0 || vh == 0)
+          {
+            vw = 320;
+            vh = 240;
+          }
+          content_w = std::min(vw, static_cast<u32>(VRAM_WIDTH));
+          content_h = std::min(vh, static_cast<u32>(VRAM_HEIGHT));
+        }
+#endif
       }
     }
     else
     {
-      content_w = 320 * scale;
-      content_h = 240 * scale;
+      content_w = 320;
+      content_h = 240;
     }
     const auto [crop_top, crop_bottom] = GetFMVCrop(content_w, content_h);
     const u32 cropped_h = content_h - crop_top - crop_bottom;
@@ -14199,9 +16179,12 @@ RETRO_API void retro_run(void)
     const u32 height_delta = (cropped_h > LibretroHost::s_last_geometry_height)
       ? (cropped_h - LibretroHost::s_last_geometry_height)
       : (LibretroHost::s_last_geometry_height - cropped_h);
-    const u32 height_threshold = 8 * (LibretroHost::s_hw_render_enabled ? g_settings.gpu_resolution_scale : 1);
+    // Threshold in native PSX lines (base dims are native after the HW-direct
+    // present rework). 8 lines is well below any real mode change.
+    const u32 height_threshold = 8;
     const bool geometry_changed = content_w != LibretroHost::s_last_geometry_width ||
-                                  height_delta > height_threshold;
+                                  height_delta > height_threshold ||
+                                  ar != LibretroHost::s_last_aspect_ratio;
     if (geometry_changed)
     {
       LibretroHost::s_last_geometry_width = content_w;
@@ -14223,6 +16206,20 @@ RETRO_API void retro_run(void)
     }
   }
 
+  // Deko3D HW-direct present first: s_hw_render_enabled is true for this path
+  // too (so SET_GEOMETRY / av_info / OnSettingsReloaded branches see HW state),
+  // but the dispatch target is libretro_deko3d set_image, NOT PushHWVideoFrame
+  // (which is the GL HW push and would crash without a GL context).
+#ifdef __SWITCH__
+  if (g_gpu_device && g_gpu_device->GetRenderAPI() == RenderAPI::Deko3D)
+  {
+    if (LibretroHost::s_deko3d_hw_path_enabled)
+      LibretroHost::PushDeko3DHWVideoFrame();
+    else
+      LibretroHost::PushDeko3DVideoFrame();
+  }
+  else
+#endif
   if (LibretroHost::s_hw_render_enabled)
   {
 #ifdef ENABLE_VULKAN
@@ -14292,6 +16289,22 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game)
       }
     }
 #endif
+#ifdef __SWITCH__
+    else if (renderer_value && (std::strcmp(renderer_value, "Deko3D") == 0))
+    {
+      const auto lock = Core::GetSettingsLock();
+      SettingsInterface& si = *Core::GetBaseSettingsLayer();
+      si.SetStringValue("GPU", "Renderer", renderer_value);
+      if (LibretroHost::SetupDeko3DHWRender())
+      {
+        LibretroHost::s_deferred_boot_pending = true;
+        LibretroHost::s_deferred_boot_path    = game->path;
+        LibretroLog(RETRO_LOG_INFO, "[GooseStation] Deko3D HW render: deferring boot until context_reset\n");
+        return true;
+      }
+      LibretroLog(RETRO_LOG_INFO, "[GooseStation] Deko3D renderer selected (CPU readback fallback)\n");
+    }
+#endif
   }
 
   LibretroHost::UpdateVariables(true);
@@ -14334,6 +16347,8 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game)
 
   LibretroHost::s_save_state_buffer.resize(System::GetMaxSaveStateSize(g_settings.cpu_enable_8mb_ram));
 
+  LibretroHost::SetInputDescriptors();
+
   LibretroLog(RETRO_LOG_INFO, "[GooseStation] Game loaded: %s\n", game->path);
   return true;
 }
@@ -14364,6 +16379,11 @@ RETRO_API void retro_unload_game(void)
 #endif
   LibretroHost::s_disk_control = {};
   LibretroHost::s_save_state_buffer.clear();
+#ifdef __SWITCH__
+  LibretroHost::s_deko3d_hw_path_enabled = false;
+  LibretroHost::s_deko3d_iface = nullptr;
+  Deko3DDevice::SetExternalDevice(nullptr);
+#endif
 }
 
 RETRO_API unsigned retro_get_region(void)
@@ -14452,31 +16472,84 @@ RETRO_API void retro_cheat_set(unsigned index, bool enabled, const char* code)
 PATCHEND
 # Modify: src/util/CMakeLists.txt
 ed -s 'src/util/CMakeLists.txt' <<'PATCHEND'
-191s/^/  /
-211,336d
-194,209d
-193a
+194,195s/^/  /
+276,340d
+264,274d
+263a
+  set_source_files_properties(
+    deko3d_device.cpp deko3d_memory_heap.cpp deko3d_pipeline.cpp
+    deko3d_stream_buffer.cpp deko3d_texture.cpp
+    PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE
+  )
+  target_link_libraries(util PRIVATE deko3d nx uam)
+.
+261,262d
+260a
+  set_source_files_properties(metal_device.mm metal_stream_buffer.mm PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
+  find_library(IOK_LIBRARY IOKit REQUIRED)
+  find_library(FOUNDATION_LIBRARY Foundation REQUIRED)
+  find_library(METAL_LIBRARY Metal REQUIRED)
+  find_library(QUARTZCORE_LIBRARY QuartzCore REQUIRED)
+  target_link_libraries(util PRIVATE ${IOK_LIBRARY} ${FOUNDATION_LIBRARY} ${METAL_LIBRARY} ${QUARTZCORE_LIBRARY})
+elseif(SWITCH)
+  target_sources(util PRIVATE
+    deko3d_device.cpp
+    deko3d_device.h
+    deko3d_memory_heap.cpp
+    deko3d_memory_heap.h
+    deko3d_pipeline.cpp
+    deko3d_pipeline.h
+    deko3d_stream_buffer.cpp
+    deko3d_stream_buffer.h
+    deko3d_texture.cpp
+    deko3d_texture.h
+.
+200,255d
+198d
+197a
 if(LINUX)
   target_link_libraries(util PRIVATE UDEV::UDEV)
+elseif(APPLE)
 .
-192a
-include("${CMAKE_SOURCE_DIR}/CMakeModules/GooseLibretroLinking.cmake")
-.
-191a
+196d
+195a
 elseif(TARGET spirv-cross-c)
   get_target_property(SPIRV_CROSS_INCLUDE_DIR spirv-cross-c INTERFACE_INCLUDE_DIRECTORIES)
+else()
+  find_path(SPIRV_CROSS_INCLUDE_DIR spirv_cross/spirv_cross_c.h)
 endif()
+if(SHADERC_INCLUDE_DIR)
+  target_include_directories(util PUBLIC ${SHADERC_INCLUDE_DIR})
+endif()
+if(SPIRV_CROSS_INCLUDE_DIR)
+  target_include_directories(util PUBLIC ${SPIRV_CROSS_INCLUDE_DIR})
+endif()
+include("${CMAKE_SOURCE_DIR}/CMakeModules/GooseLibretroLinking.cmake")
 .
-190a
+194a
+else()
+  find_path(SHADERC_INCLUDE_DIR shaderc/shaderc.h)
+endif()
 if(TARGET spirv-cross-c-shared)
 .
-189a
-# For libretro builds, link statically (dlopen is impractical on Android).
+193d
+192a
+# shaderc/spirv-cross headers are needed unconditionally (dyn_shaderc.h, dyn_spirv_cross.h).
+# For libretro builds, link statically when available (dlopen is impractical on Android/macOS).
+if(TARGET Shaderc::shaderc_shared)
 .
-134,162d
-121,127d
-100,101d
-99a
+138,161d
+137a
+  elseif(APPLE)
+.
+125,132d
+124a
+  # On Switch libretro, RA owns the GL context — don't link EGL or Mesa.
+  # Bundled Mesa libraries conflict with RA's own GL init (GPU fault on start).
+  if((LINUX OR BSD OR ANDROID) OR (SWITCH AND NOT BUILD_LIBRETRO))
+.
+104,105d
+103a
 target_precompile_headers(util PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/pch.h")
 target_include_directories(util PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
 target_include_directories(util PRIVATE "${PROJECT_SOURCE_DIR}/dep/imgui/include")
@@ -14485,22 +16558,22 @@ target_link_libraries(util PRIVATE libchdr lzma PNG::PNG xxhash libjpeg-turbo::j
 if(NOT BUILD_LIBRETRO)
   target_link_libraries(util PRIVATE plutosvg::plutosvg SoundTouch::SoundTouchDLL)
 .
-86,97d
-85a
+90,101d
+89a
 target_sources(util PRIVATE compress_helpers.cpp compress_helpers.h core_audio_stream.cpp core_audio_stream.h ini_settings_interface.cpp ini_settings_interface.h input_manager.cpp input_manager.h shadergen.cpp shadergen.h)
 if(NOT BUILD_LIBRETRO)
   target_sources(util PRIVATE imgui_gsvector.h animated_image.cpp animated_image.h input_source.cpp input_source.h media_capture.cpp)
 .
-80,81d
-77a
+84,85d
+81a
   wav_reader_writer.cpp
   wav_reader_writer.h
 .
-70,73d
-56,67d
-52,53d
-41,49d
-37,38d
+74,77d
+60,71d
+54,57d
+43,51d
+37,40d
 19,22d
 2,3d
 wq
@@ -14644,6 +16717,3258 @@ ed -s 'src/util/core_audio_stream.h' <<'PATCHEND'
 .
 wq
 PATCHEND
+mkdir -p 'src/util'
+# Add: src/util/deko3d_device.cpp
+cat > 'src/util/deko3d_device.cpp' <<'PATCHEND'
+// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-License-Identifier: CC-BY-NC-ND-4.0
+//
+// Deko3D GPUDevice backend for Nintendo Switch.
+
+#include "deko3d_device.h"
+#include "deko3d_pipeline.h"
+#include "deko3d_stream_buffer.h"
+#include "deko3d_texture.h"
+
+#include "common/align.h"
+#include "common/assert.h"
+#include "common/bitutils.h"
+#include "common/error.h"
+#include "common/log.h"
+#include "common/string_util.h"
+#include "common/timer.h"
+
+#include <array>
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <utility>
+
+#include <switch.h>
+#include <uam.h>
+
+LOG_CHANNEL(GPUDevice);
+
+namespace {
+enum : u32
+{
+  GENERAL_HEAP_SIZE = 1024 * 1024 * 256,
+  TEXTURE_HEAP_SIZE = 1024 * 1024 * 512,
+  SHADER_HEAP_SIZE = 1024 * 1024 * 32,
+
+  MAX_COMBINED_IMAGE_SAMPLER_DESCRIPTORS_PER_FRAME = 1024,
+
+  GENERAL_HEAP_MAX_ALLOCS = 4096,
+  TEXTURE_HEAP_MAX_ALLOCS = 4096,
+  SHADER_HEAP_MAX_ALLOCS = 4096,
+
+  VERTEX_BUFFER_SIZE = 32 * 1024 * 1024,
+  INDEX_BUFFER_SIZE = 16 * 1024 * 1024,
+  UNIFORM_BUFFER_SIZE = 8 * 1024 * 1024,
+  TEXTURE_BUFFER_SIZE = 64 * 1024 * 1024,
+
+  UNIFORM_PUSH_CONSTANTS_SIZE = 128,
+  MAX_UNIFORM_BUFFER_SIZE = DK_UNIFORM_BUF_MAX_SIZE,
+  COMMAND_BUFFER_GROW_MIN = 1024 * 1024,
+};
+
+void Deko3D_DebugOut(void* userData, const char* context, DkResult result, const char* message)
+{
+  if (result == DkResult_Success)
+    DEBUG_LOG("deko3d: {}", message);
+  else
+    ERROR_LOG("deko3d error ({}): {}", static_cast<int>(result), message);
+}
+
+void Deko3D_CmdBufAddMem(void* userData, DkCmdBuf cmdbuf, size_t min_req_size)
+{
+  auto* device = reinterpret_cast<Deko3DDevice*>(userData);
+  device->AddCommandBufferMemory(cmdbuf, min_req_size);
+}
+} // namespace
+
+Deko3DDevice::Deko3DDevice() = default;
+Deko3DDevice::~Deko3DDevice() = default;
+
+namespace {
+DkDevice s_external_dk_device = nullptr;
+} // namespace
+
+void Deko3DDevice::SetExternalDevice(DkDevice device)
+{
+  s_external_dk_device = device;
+}
+
+Deko3DStreamBuffer* Deko3DDevice::GetTextureUploadBuffer()
+{
+  return GetInstance().m_texture_upload_buffer.get();
+}
+
+bool Deko3DDevice::CreateDeviceAndMainSwapChain(std::string_view adapter, CreateFlags create_flags,
+                                                const WindowInfo& wi, GPUVSyncMode vsync_mode,
+                                                const ExclusiveFullscreenMode* exclusive_fullscreen_mode,
+                                                std::optional<bool> exclusive_fullscreen_control, Error* error)
+{
+  ERROR_LOG("DEKO3D: about to uam_init...");
+  uam_init();
+  ERROR_LOG("DEKO3D: uam_init done");
+
+
+  m_render_api = RenderAPI::Deko3D;
+  m_features.dual_source_blend = true;
+  m_features.per_sample_shading = true;
+  m_features.noperspective_interpolation = true;
+  m_features.texture_copy_to_self = true;
+  m_features.texture_buffers = true;
+  m_features.geometry_shaders = true;
+  m_features.partial_msaa_resolve = true;
+  m_features.shader_cache = true;
+  m_features.explicit_present = false;
+  m_features.memory_import = false;
+  m_features.feedback_loops = false;
+
+  m_max_texture_size = 8192;
+  m_max_multisamples = 8;
+
+  if (s_external_dk_device)
+  {
+    m_device = dk::Device(s_external_dk_device);
+    m_owns_device = false;
+    INFO_LOG("Deko3DDevice: using external DkDevice from embedder (libretro_deko3d iface)");
+  }
+  else
+  {
+    m_device = dk::DeviceMaker{}.setFlags(DkDeviceFlags_DepthZeroToOne | DkDeviceFlags_OriginLowerLeft).setCbDebug(Deko3D_DebugOut).create();
+    m_owns_device = true;
+  }
+  m_queue = dk::QueueMaker{m_device}.setFlags(DkQueueFlags_Graphics).create();
+
+  if (!CreateBuffers() || !CreateCommandBuffers())
+  {
+    Error::SetStringView(error, "Failed to create deko3d buffers/command buffers");
+    return false;
+  }
+
+  CreateNullTexture();
+  MoveToNextCommandBuffer();
+
+  m_push_buffer = m_general_heap.Alloc(UNIFORM_PUSH_CONSTANTS_SIZE, DK_UNIFORM_BUF_ALIGNMENT);
+
+  dk::CmdBuf cmdbuf = GetCurrentCommandBuffer();
+  cmdbuf.bindVtxBuffer(0, m_vertex_buffer->GetPointer(), m_vertex_buffer->GetCurrentSize());
+  cmdbuf.bindIdxBuffer(DkIdxFormat_Uint16, m_index_buffer->GetPointer());
+  // Push-constant UBO at binding=1 per shadergen.cpp.
+  cmdbuf.bindUniformBuffer(DkStage_Vertex, 1, m_general_heap.GPUPointer(m_push_buffer), m_push_buffer.size);
+  cmdbuf.bindUniformBuffer(DkStage_Fragment, 1, m_general_heap.GPUPointer(m_push_buffer), m_push_buffer.size);
+  if (m_features.geometry_shaders)
+    cmdbuf.bindUniformBuffer(DkStage_Geometry, 1, m_general_heap.GPUPointer(m_push_buffer), m_push_buffer.size);
+
+  // libretro path: no real swap chain. The frontend owns presentation.
+  // wi.surface_handle == nullptr in libretro.
+  if (!wi.IsSurfaceless() && wi.window_handle != nullptr)
+  {
+    m_main_swap_chain = Deko3DSwapChain::Create(wi, vsync_mode, error);
+    if (!m_main_swap_chain)
+      return false;
+  }
+
+  return true;
+}
+
+void Deko3DDevice::DestroyDevice()
+{
+  if (m_device)
+    WaitForGPUIdle();
+
+  m_main_swap_chain.reset();
+  m_null_texture.reset();
+  m_texture_upload_buffer.reset();
+  m_vertex_buffer.reset();
+  m_index_buffer.reset();
+  m_uniform_buffer.reset();
+
+  for (auto& res : m_frame_resources)
+  {
+    for (auto& cb : res.command_buffers)
+      cb = {};
+  }
+
+  m_general_heap.Destroy();
+  m_texture_heap.Destroy();
+  m_shader_heap.Destroy();
+
+  if (m_queue)
+    m_queue.destroy();
+  if (m_device && m_owns_device)
+    m_device.destroy();
+  m_device = nullptr;
+  m_owns_device = false;
+
+  uam_deinit();
+}
+
+bool Deko3DDevice::CreateBuffers()
+{
+  if (!m_general_heap.Create(GENERAL_HEAP_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached,
+                             GENERAL_HEAP_MAX_ALLOCS) ||
+      !m_texture_heap.Create(TEXTURE_HEAP_SIZE, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image,
+                             TEXTURE_HEAP_MAX_ALLOCS) ||
+      !m_shader_heap.Create(SHADER_HEAP_SIZE,
+                            DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code,
+                            SHADER_HEAP_MAX_ALLOCS))
+  {
+    return false;
+  }
+
+  m_texture_upload_buffer = Deko3DStreamBuffer::Create(TEXTURE_BUFFER_SIZE);
+  m_vertex_buffer = Deko3DStreamBuffer::Create(VERTEX_BUFFER_SIZE);
+  m_index_buffer = Deko3DStreamBuffer::Create(INDEX_BUFFER_SIZE);
+  m_uniform_buffer = Deko3DStreamBuffer::Create(UNIFORM_BUFFER_SIZE);
+  return true;
+}
+
+bool Deko3DDevice::CreateCommandBuffers()
+{
+  for (CommandBuffer& res : m_frame_resources)
+  {
+    for (u32 i = 0; i < COMMAND_BUFFER_TYPES; i++)
+    {
+      res.command_buffers[i] = dk::CmdBufMaker{m_device}.setCbAddMem(Deko3D_CmdBufAddMem).setUserData(this).create();
+      if (!res.command_buffers[i])
+        return false;
+    }
+    res.image_descriptors = m_general_heap.Alloc(
+      sizeof(dk::ImageDescriptor) * MAX_COMBINED_IMAGE_SAMPLER_DESCRIPTORS_PER_FRAME, DK_IMAGE_DESCRIPTOR_ALIGNMENT);
+    res.sampler_descriptors = m_general_heap.Alloc(
+      sizeof(dk::SamplerDescriptor) * MAX_COMBINED_IMAGE_SAMPLER_DESCRIPTORS_PER_FRAME, DK_SAMPLER_DESCRIPTOR_ALIGNMENT);
+  }
+  return true;
+}
+
+void Deko3DDevice::AddCommandBufferMemory(dk::CmdBuf cmdbuf, size_t min_size)
+{
+  CommandBuffer& res = m_frame_resources[m_current_frame];
+  size_t size = std::max<size_t>(min_size, COMMAND_BUFFER_GROW_MIN);
+  Deko3DMemoryHeap::Allocation mem = m_general_heap.Alloc(size, DK_CMDMEM_ALIGNMENT);
+  cmdbuf.addMemory(m_general_heap.GetMemBlock(), mem.offset, size);
+
+  int type = (cmdbuf == res.command_buffers[COMMAND_BUFFER_INIT]) ? COMMAND_BUFFER_INIT : COMMAND_BUFFER_REGULAR;
+  res.command_memory[type].push_back(mem);
+}
+
+dk::CmdBuf Deko3DDevice::GetCurrentCommandBuffer()
+{
+  return m_frame_resources[m_current_frame].command_buffers[COMMAND_BUFFER_REGULAR];
+}
+
+dk::CmdBuf Deko3DDevice::GetCurrentInitCommandBuffer()
+{
+  CommandBuffer& res = m_frame_resources[m_current_frame];
+  res.init_buffer_used = true;
+  return res.command_buffers[COMMAND_BUFFER_INIT];
+}
+
+void Deko3DDevice::MoveToNextCommandBuffer()
+{
+  BeginCommandBuffer((m_current_frame + 1) % NUM_COMMAND_BUFFERS);
+}
+
+void Deko3DDevice::BeginCommandBuffer(u32 idx)
+{
+  CommandBuffer& res = m_frame_resources[idx];
+  if (res.fence_counter > m_completed_fence_counter)
+    WaitForCommandBufferCompletion(idx);
+
+  // Free all command memory blocks except the most recent one (kept to avoid free-then-realloc churn).
+  for (u32 t = 0; t < COMMAND_BUFFER_TYPES; t++)
+  {
+    auto& mem = res.command_memory[t];
+    if (mem.size() > 1)
+    {
+      for (size_t i = 0; i < mem.size() - 1; i++)
+        m_general_heap.Free(mem[i]);
+      auto last = mem.back();
+      mem.clear();
+      mem.push_back(last);
+    }
+  }
+
+  res.init_buffer_used = false;
+  res.fence_counter = m_next_fence_counter++;
+  m_current_frame = idx;
+  res.next_image_descriptor = 0;
+  res.next_sampler_descriptor = 0;
+
+  res.command_buffers[COMMAND_BUFFER_REGULAR].bindImageDescriptorSet(
+    m_general_heap.GPUPointer(res.image_descriptors), MAX_COMBINED_IMAGE_SAMPLER_DESCRIPTORS_PER_FRAME);
+  res.command_buffers[COMMAND_BUFFER_REGULAR].bindSamplerDescriptorSet(
+    m_general_heap.GPUPointer(res.sampler_descriptors), MAX_COMBINED_IMAGE_SAMPLER_DESCRIPTORS_PER_FRAME);
+
+  m_textures_dirty = (1u << MAX_TEXTURE_SAMPLERS) - 1;
+}
+
+void Deko3DDevice::WaitForCommandBufferCompletion(u32 index)
+{
+  m_frame_resources[index].fence.wait();
+  const u64 now = m_frame_resources[index].fence_counter;
+  m_completed_fence_counter = now;
+  while (!m_cleanup_objects.empty())
+  {
+    auto& it = m_cleanup_objects.front();
+    if (std::get<0>(it) > now)
+      break;
+    std::get<1>(it).get().Free(std::get<2>(it));
+    m_cleanup_objects.pop_front();
+  }
+}
+
+void Deko3DDevice::WaitForFenceCounter(u64 fence_counter)
+{
+  if (m_completed_fence_counter >= fence_counter)
+    return;
+
+  u32 idx = (m_current_frame + 1) % NUM_COMMAND_BUFFERS;
+  while (idx != m_current_frame)
+  {
+    if (m_frame_resources[idx].fence_counter >= fence_counter)
+      break;
+    idx = (idx + 1) % NUM_COMMAND_BUFFERS;
+  }
+  if (idx != m_current_frame)
+    WaitForCommandBufferCompletion(idx);
+}
+
+void Deko3DDevice::WaitForGPUIdle()
+{
+  m_queue.waitIdle();
+  // GPU is fully idle: every fence counter up to m_next_fence_counter-1 has
+  // completed, so all deferred frees are safe to apply now.  Without this
+  // drain, PurgeTexturePool() during a resolution-scale change queues the old
+  // textures into m_cleanup_objects but never returns their heap memory, and
+  // the subsequent CreateBuffers() sees a falsely-full heap and OOMs.
+  m_completed_fence_counter = m_next_fence_counter - 1;
+  while (!m_cleanup_objects.empty())
+  {
+    std::get<1>(m_cleanup_objects.front()).get().Free(std::get<2>(m_cleanup_objects.front()));
+    m_cleanup_objects.pop_front();
+  }
+}
+
+void Deko3DDevice::FlushCommands()
+{
+  m_queue.flush();
+}
+
+void Deko3DDevice::SubmitCommandBuffer()
+{
+  CommandBuffer& res = m_frame_resources[m_current_frame];
+  if (res.init_buffer_used)
+  {
+    auto init_list = res.command_buffers[COMMAND_BUFFER_INIT].finishList();
+    m_queue.submitCommands(init_list);
+  }
+  auto reg_list = res.command_buffers[COMMAND_BUFFER_REGULAR].finishList();
+  m_queue.submitCommands(reg_list);
+  m_queue.signalFence(res.fence);
+  m_queue.flush();
+}
+
+void Deko3DDevice::SubmitCommandBuffer(bool wait_for_completion)
+{
+  const u32 cur = m_current_frame;
+  SubmitCommandBuffer();
+  MoveToNextCommandBuffer();
+  if (wait_for_completion)
+    WaitForCommandBufferCompletion(cur);
+}
+
+void Deko3DDevice::SubmitCommandBuffer(bool wait_for_completion, const char* reason, ...)
+{
+  char buf[256];
+  std::va_list ap;
+  va_start(ap, reason);
+  std::vsnprintf(buf, sizeof(buf), reason, ap);
+  va_end(ap);
+  WARNING_LOG("Executing command buffer due to '{}'", buf);
+  SubmitCommandBuffer();
+  MoveToNextCommandBuffer();
+  if (wait_for_completion)
+    WaitForCommandBufferCompletion((m_current_frame + NUM_COMMAND_BUFFERS - 1) % NUM_COMMAND_BUFFERS);
+}
+
+void Deko3DDevice::SubmitCommandBuffer(Deko3DSwapChain* present_swap_chain)
+{
+  CommandBuffer& res = m_frame_resources[m_current_frame];
+  if (res.init_buffer_used)
+    m_queue.submitCommands(res.command_buffers[COMMAND_BUFFER_INIT].finishList());
+  m_queue.submitCommands(res.command_buffers[COMMAND_BUFFER_REGULAR].finishList());
+  m_queue.signalFence(res.fence);
+  if (present_swap_chain)
+    present_swap_chain->PresentImage();
+  else
+    m_queue.flush();
+}
+
+void Deko3DDevice::DeferedFree(Deko3DMemoryHeap& heap, Deko3DMemoryHeap::Allocation alloc)
+{
+  m_cleanup_objects.emplace_back(GetCurrentFenceCounter(), std::ref(heap), alloc);
+}
+
+void Deko3DDevice::CreateNullTexture()
+{
+  m_null_texture =
+    Deko3DTexture::Create(1, 1, 1, 1, 1, GPUTexture::Type::RenderTarget, GPUTextureFormat::RGBA8, 0);
+  if (m_null_texture)
+  {
+    u32 white = 0xFFFFFFFFu;
+    m_null_texture->Update(0, 0, 1, 1, &white, 4);
+  }
+}
+
+// --- Unbind helpers ----------------------------------------------------------
+
+void Deko3DDevice::UnbindPipeline(Deko3DPipeline* pipeline)
+{
+  if (m_current_pipeline == pipeline)
+    m_current_pipeline = nullptr;
+}
+
+void Deko3DDevice::UnbindTexture(Deko3DTexture* tex)
+{
+  for (u32 i = 0; i < MAX_TEXTURE_SAMPLERS; i++)
+  {
+    if (m_current_textures[i] == tex)
+    {
+      m_current_textures[i] = m_null_texture.get();
+      m_textures_dirty |= 1u << i;
+    }
+  }
+
+  if (tex && tex->IsRenderTarget())
+  {
+    for (u32 i = 0; i < m_num_current_render_targets; i++)
+    {
+      if (m_current_render_targets[i] == tex)
+      {
+        SetRenderTargets(nullptr, 0, m_current_depth_target);
+        break;
+      }
+    }
+  }
+  else if (tex && tex->IsDepthStencil())
+  {
+    if (m_current_depth_target == tex)
+      SetRenderTargets(nullptr, 0, nullptr);
+  }
+}
+
+void Deko3DDevice::UnbindTextureBuffer(Deko3DTextureBuffer* buffer)
+{
+  if (m_current_texture_buffer == buffer)
+  {
+    m_current_texture_buffer = nullptr;
+    m_textures_dirty |= 1u;
+  }
+}
+
+void Deko3DDevice::UnbindTextureSampler(Deko3DSampler* sampler)
+{
+  for (u32 i = 0; i < MAX_TEXTURE_SAMPLERS; i++)
+  {
+    if (m_current_samplers[i] == sampler)
+    {
+      m_current_samplers[i] = nullptr;
+      m_textures_dirty |= 1u << i;
+    }
+  }
+}
+
+
+std::string Deko3DDevice::GetDriverInfo() const
+{
+  return "Deko3D";
+}
+
+s32 Deko3DDevice::IsRenderTargetBound(const GPUTexture* tex) const
+{
+  for (u32 i = 0; i < m_num_current_render_targets; i++)
+  {
+    if (m_current_render_targets[i] == tex)
+      return static_cast<s32>(i);
+  }
+  return -1;
+}
+
+void Deko3DDevice::CommitClear(dk::CmdBuf command_buffer, Deko3DTexture* tex)
+{
+  if (tex->GetState() == GPUTexture::State::Dirty)
+    return;
+
+  std::array<GPUTexture*, MAX_RENDER_TARGETS> restore_rts{};
+  for (u32 i = 0; i < m_num_current_render_targets; i++)
+    restore_rts[i] = m_current_render_targets[i];
+  const u32 restore_rt_num = m_num_current_render_targets;
+  GPUTexture* const restore_depth_rt = m_current_depth_target;
+
+  tex->SetBarrierCounter(m_barrier_counter);
+
+  dk::ImageView view{tex->GetImage()};
+  if (tex->IsDepthStencil())
+  {
+    command_buffer.bindRenderTargets({}, &view);
+    m_num_current_render_targets = 0;
+    m_current_depth_target = tex;
+  }
+  else
+  {
+    command_buffer.bindRenderTargets({&view});
+    m_num_current_render_targets = 1;
+    m_current_render_targets[0] = tex;
+    m_current_depth_target = nullptr;
+  }
+
+  if (tex->GetState() == GPUTexture::State::Cleared)
+  {
+    GSVector4i restore_rect = m_last_scissor;
+    SetScissor(GSVector4i::cxpr(0, 0, tex->GetWidth(), tex->GetHeight()));
+
+    if (tex->IsDepthStencil())
+    {
+      command_buffer.clearDepthStencil(true, tex->GetClearDepth(), 0xFF, 0);
+    }
+    else
+    {
+      GPUPipeline::BlendState blend_state = m_last_blend_state;
+      const u32 restore_write_mask = blend_state.write_mask;
+      blend_state.write_mask = 0xF;
+      ApplyBlendState(blend_state);
+
+      const auto color = tex->GetUNormClearColor();
+      command_buffer.clearColor(0, DkColorMask_RGBA, color[0], color[1], color[2], color[3]);
+
+      blend_state.write_mask = restore_write_mask;
+      ApplyBlendState(blend_state);
+    }
+
+    SetScissor(restore_rect);
+  }
+  else // Invalidated
+  {
+    tex->MakeReadyForSampling();
+    if (tex->IsDepthStencil())
+      command_buffer.discardDepthStencil();
+    else
+      command_buffer.discardColor(0);
+  }
+
+  tex->SetState(GPUTexture::State::Dirty);
+
+  SetRenderTargets(restore_rts.data(), restore_rt_num, restore_depth_rt);
+}
+
+void Deko3DDevice::CommitRTClearInFB(Deko3DTexture* tex, u32 idx)
+{
+  dk::CmdBuf command_buffer = GetCurrentCommandBuffer();
+
+  switch (tex->GetState())
+  {
+    case GPUTexture::State::Invalidated:
+    {
+      tex->MakeReadyForSampling();
+      if (tex->IsDepthStencil())
+        command_buffer.discardDepthStencil();
+      else
+        command_buffer.discardColor(idx);
+      tex->SetState(GPUTexture::State::Dirty);
+      break;
+    }
+
+    case GPUTexture::State::Cleared:
+    {
+      const auto color = tex->GetUNormClearColor();
+      GSVector4i restore_rect = m_last_scissor;
+      SetScissor(GSVector4i::cxpr(0, 0, tex->GetWidth(), tex->GetHeight()));
+
+      if (tex->IsDepthStencil())
+      {
+        command_buffer.clearDepthStencil(true, tex->GetClearDepth(), 0xFF, 0);
+      }
+      else
+      {
+        GPUPipeline::BlendState blend_state = m_last_blend_state;
+        const u32 restore_write_mask = blend_state.write_mask;
+        blend_state.write_mask = 0xF;
+        ApplyBlendState(blend_state);
+
+        command_buffer.clearColor(idx, DkColorMask_RGBA, color[0], color[1], color[2], color[3]);
+
+        blend_state.write_mask = restore_write_mask;
+        ApplyBlendState(blend_state);
+      }
+
+      SetScissor(restore_rect);
+      tex->SetState(GPUTexture::State::Dirty);
+      break;
+    }
+
+    case GPUTexture::State::Dirty:
+      break;
+
+    default:
+      UnreachableCode();
+      break;
+  }
+}
+
+void Deko3DDevice::ClearRenderTarget(GPUTexture* t, u32 c)
+{
+  GPUDevice::ClearRenderTarget(t, c);
+  if (const s32 idx = IsRenderTargetBound(t); idx >= 0)
+    CommitRTClearInFB(static_cast<Deko3DTexture*>(t), static_cast<u32>(idx));
+}
+
+void Deko3DDevice::ClearDepth(GPUTexture* t, float d)
+{
+  GPUDevice::ClearDepth(t, d);
+  if (m_current_depth_target == t)
+    CommitRTClearInFB(static_cast<Deko3DTexture*>(t), 0);
+}
+
+void Deko3DDevice::InvalidateRenderTarget(GPUTexture* t)
+{
+  GPUDevice::InvalidateRenderTarget(t);
+  if (t->IsRenderTarget())
+  {
+    if (const s32 idx = IsRenderTargetBound(t); idx >= 0)
+      CommitRTClearInFB(static_cast<Deko3DTexture*>(t), static_cast<u32>(idx));
+  }
+  else
+  {
+    DebugAssert(t->IsDepthStencil());
+    if (m_current_depth_target == t)
+      CommitRTClearInFB(static_cast<Deko3DTexture*>(t), 0);
+  }
+}
+
+std::unique_ptr<GPUSwapChain> Deko3DDevice::CreateSwapChain(const WindowInfo& wi, GPUVSyncMode vsync_mode,
+                                                            const ExclusiveFullscreenMode*, std::optional<bool>,
+                                                            Error* error)
+{
+  return Deko3DSwapChain::Create(wi, vsync_mode, error);
+}
+
+std::unique_ptr<GPUTexture> Deko3DDevice::CreateTexture(u32 width, u32 height, u32 layers, u32 levels, u32 samples,
+                                                        GPUTexture::Type type, GPUTextureFormat format,
+                                                        GPUTexture::Flags flags, const void* data, u32 data_stride,
+                                                        Error* error)
+{
+  u32 dk_flags = 0;
+  if (type == GPUTexture::Type::RenderTarget || type == GPUTexture::Type::DepthStencil)
+    dk_flags |= DkImageFlags_UsageRender | DkImageFlags_HwCompression;
+
+  auto tex = Deko3DTexture::Create(width, height, layers, levels, samples, type, format, dk_flags);
+  if (!tex)
+  {
+    Error::SetStringView(error, "Deko3DTexture::Create failed");
+    return nullptr;
+  }
+  if (data)
+    tex->Update(0, 0, width, height, data, data_stride);
+  return tex;
+}
+
+std::unique_ptr<GPUSampler> Deko3DDevice::CreateSampler(const GPUSampler::Config& config, Error* error)
+{
+  static constexpr std::array<DkWrapMode, static_cast<u8>(GPUSampler::AddressMode::MaxCount)> ta = {{
+    DkWrapMode_Repeat,
+    DkWrapMode_ClampToEdge,
+    DkWrapMode_ClampToBorder,
+    DkWrapMode_MirroredRepeat,
+  }};
+
+  static constexpr std::array<DkFilter, static_cast<u8>(GPUSampler::Filter::MaxCount)> filter = {
+    {DkFilter_Nearest, DkFilter_Linear}};
+  static constexpr std::array<DkMipFilter, static_cast<u8>(GPUSampler::Filter::MaxCount)> mip_filter = {
+    {DkMipFilter_Nearest, DkMipFilter_Linear}};
+
+  dk::Sampler sampler;
+  sampler.setFilter(filter[static_cast<u8>(config.min_filter.GetValue())],
+                    filter[static_cast<u8>(config.mag_filter.GetValue())],
+                    mip_filter[static_cast<u8>(config.mip_filter.GetValue())]);
+  sampler.setWrapMode(ta[static_cast<u8>(config.address_u.GetValue())],
+                      ta[static_cast<u8>(config.address_v.GetValue())],
+                      ta[static_cast<u8>(config.address_w.GetValue())]);
+  sampler.setLodClamp(static_cast<float>(config.min_lod), static_cast<float>(config.max_lod));
+  sampler.setBorderColor(config.GetBorderRed(), config.GetBorderGreen(), config.GetBorderBlue(),
+                         config.GetBorderAlpha());
+  sampler.setMaxAnisotropy(static_cast<float>(config.anisotropy.GetValue()));
+
+  dk::SamplerDescriptor descriptor;
+  descriptor.initialize(sampler);
+
+  return std::unique_ptr<Deko3DSampler>(new Deko3DSampler(descriptor));
+}
+
+std::unique_ptr<GPUTextureBuffer> Deko3DDevice::CreateTextureBuffer(GPUTextureBuffer::Format format,
+                                                                   u32 size_in_elements, Error* error)
+{
+  const u32 buffer_size = GPUTextureBuffer::GetElementSize(format) * size_in_elements;
+
+  static constexpr std::array<DkImageFormat, static_cast<u8>(GPUTextureBuffer::Format::MaxCount)> format_mapping = {{
+    DkImageFormat_R16_Uint,
+  }};
+
+  std::unique_ptr<Deko3DStreamBuffer> buffer = Deko3DStreamBuffer::Create(buffer_size);
+  if (!buffer)
+  {
+    Error::SetStringView(error, "Deko3DStreamBuffer::Create failed");
+    return nullptr;
+  }
+
+  dk::ImageLayout layout;
+  dk::ImageLayoutMaker{m_device}
+    .setType(DkImageType_Buffer)
+    .setDimensions(size_in_elements)
+    .setFormat(format_mapping[static_cast<u8>(format)])
+    .initialize(layout);
+
+  return std::unique_ptr<GPUTextureBuffer>(
+    new Deko3DTextureBuffer(format, size_in_elements, std::move(buffer), layout));
+}
+
+std::unique_ptr<GPUDownloadTexture> Deko3DDevice::CreateDownloadTexture(u32 width, u32 height, GPUTextureFormat format,
+                                                                        Error* error)
+{
+  return Deko3DDownloadTexture::Create(width, height, format, nullptr, 0, 0);
+}
+
+std::unique_ptr<GPUDownloadTexture> Deko3DDevice::CreateDownloadTexture(u32 width, u32 height, GPUTextureFormat format,
+                                                                        void* memory, size_t memory_size,
+                                                                        u32 memory_stride, Error* error)
+{
+  return Deko3DDownloadTexture::Create(width, height, format, memory, memory_size, memory_stride);
+}
+
+bool Deko3DDevice::SupportsTextureFormat(GPUTextureFormat format) const
+{
+  return Deko3DTextureFormatSupported(format);
+}
+
+void Deko3DDevice::CopyTextureRegion(GPUTexture* dst, u32 dst_x, u32 dst_y, u32 dst_layer, u32 dst_level,
+                                     GPUTexture* src, u32 src_x, u32 src_y, u32 src_layer, u32 src_level,
+                                     u32 width, u32 height)
+{
+  Deko3DTexture* const S = static_cast<Deko3DTexture*>(src);
+  Deko3DTexture* const D = static_cast<Deko3DTexture*>(dst);
+
+  dk::CmdBuf command_buffer = GetCurrentCommandBuffer();
+
+  if (S->GetState() == GPUTexture::State::Cleared)
+  {
+    if (D->IsRenderTargetOrDepthStencil())
+    {
+      if (dst_level == 0 && dst_x == 0 && dst_y == 0 && width == D->GetWidth() && height == D->GetHeight())
+      {
+        if (S->IsDepthStencil())
+          D->SetClearDepth(S->GetClearDepth());
+        else
+          D->SetClearColor(S->GetClearColor());
+        return;
+      }
+
+      if (D->GetState() == GPUTexture::State::Cleared)
+      {
+        if (D->IsDepthStencil())
+        {
+          if (D->GetClearDepth() == S->GetClearDepth())
+            return;
+        }
+        else
+        {
+          if (D->GetClearColor() == S->GetClearColor())
+            return;
+        }
+      }
+    }
+    CommitClear(command_buffer, S);
+  }
+
+  if (D->GetState() == GPUTexture::State::Cleared &&
+      (dst_level != 0 || dst_x != 0 || dst_y != 0 || width != D->GetWidth() || height != D->GetHeight()))
+  {
+    CommitClear(command_buffer, D);
+  }
+
+
+  dk::ImageView src_view{S->GetImage()};
+  src_view.setMipLevels(src_level);
+  dk::ImageView dst_view{D->GetImage()};
+  dst_view.setMipLevels(dst_level);
+  command_buffer.copyImage(src_view, {src_x, src_y, src_layer, width, height, 1}, dst_view,
+                           {dst_x, dst_y, dst_layer, width, height, 1});
+
+  GPUDevice::GetStatistics().num_copies++;
+  D->SetState(GPUTexture::State::Dirty);
+}
+
+void Deko3DDevice::ResolveTextureRegion(GPUTexture* dst, u32 dst_x, u32 dst_y, u32 dst_layer, u32 dst_level,
+                                        GPUTexture* src, u32 src_x, u32 src_y, u32 width, u32 height)
+{
+  DebugAssert((src_x + width) <= src->GetWidth());
+  DebugAssert((src_y + height) <= src->GetHeight());
+  DebugAssert(src->IsMultisampled());
+  DebugAssert(dst_level < dst->GetLevels() && dst_layer < dst->GetLayers());
+  DebugAssert((dst_x + width) <= dst->GetMipWidth(dst_level));
+  DebugAssert((dst_y + height) <= dst->GetMipHeight(dst_level));
+  DebugAssert(!dst->IsMultisampled() && src->IsMultisampled());
+
+  GPUDevice::GetStatistics().num_copies++;
+
+  Deko3DTexture* D = static_cast<Deko3DTexture*>(dst);
+  Deko3DTexture* S = static_cast<Deko3DTexture*>(src);
+  dk::CmdBuf cmdbuf = GetCurrentCommandBuffer();
+
+
+  if (S->GetState() == GPUTexture::State::Cleared)
+    CommitClear(cmdbuf, S);
+  if (D->IsRenderTargetOrDepthStencil() && D->GetState() == GPUTexture::State::Cleared)
+  {
+    if (width < dst->GetWidth() || height < dst->GetHeight())
+      CommitClear(cmdbuf, D);
+    else
+      D->SetState(GPUTexture::State::Dirty);
+  }
+
+  dk::ImageView src_view{S->GetImage()};
+  dk::ImageView dst_view{D->GetImage()};
+
+  cmdbuf.blitImage(src_view, {src_x, src_y, 0, width, height, 1}, dst_view,
+                   {dst_x, dst_y, dst_layer, width, height, 1}, DkBlitFlag_FilterLinear);
+}
+
+#ifdef ENABLE_GPU_OBJECT_NAMES
+void Deko3DDevice::PushDebugGroup(const char*) {}
+void Deko3DDevice::PopDebugGroup() {}
+void Deko3DDevice::InsertDebugMessage(const char*) {}
+#endif
+
+void Deko3DDevice::MapVertexBuffer(u32 vertex_size, u32 vertex_count, void** map_ptr, u32* map_space,
+                                   u32* map_base_vertex)
+{
+  const u32 req = vertex_size * vertex_count;
+  if (!m_vertex_buffer->ReserveMemory(req, vertex_size))
+  {
+    SubmitCommandBuffer(false, "out of vertex space");
+    if (!m_vertex_buffer->ReserveMemory(req, vertex_size))
+      Panic("Failed to allocate vertex space");
+  }
+  *map_ptr = m_vertex_buffer->GetCurrentHostPointer();
+  *map_space = m_vertex_buffer->GetCurrentSpace() / vertex_size;
+  *map_base_vertex = m_vertex_buffer->GetCurrentOffset() / vertex_size;
+}
+
+void Deko3DDevice::UnmapVertexBuffer(u32 vertex_size, u32 vertex_count)
+{
+  m_vertex_buffer->CommitMemory(vertex_size * vertex_count);
+}
+
+void Deko3DDevice::MapIndexBuffer(u32 index_count, DrawIndex** map_ptr, u32* map_space, u32* map_base_index)
+{
+  const u32 req = sizeof(DrawIndex) * index_count;
+  if (!m_index_buffer->ReserveMemory(req, sizeof(DrawIndex)))
+  {
+    SubmitCommandBuffer(false, "out of index space");
+    if (!m_index_buffer->ReserveMemory(req, sizeof(DrawIndex)))
+      Panic("Failed to allocate index space");
+  }
+  *map_ptr = reinterpret_cast<DrawIndex*>(m_index_buffer->GetCurrentHostPointer());
+  *map_space = m_index_buffer->GetCurrentSpace() / sizeof(DrawIndex);
+  *map_base_index = m_index_buffer->GetCurrentOffset() / sizeof(DrawIndex);
+}
+
+void Deko3DDevice::UnmapIndexBuffer(u32 used_index_count)
+{
+  m_index_buffer->CommitMemory(sizeof(DrawIndex) * used_index_count);
+}
+
+void* Deko3DDevice::MapUniformBuffer(u32 size)
+{
+  const u32 used = Common::AlignUpPow2(size, DK_UNIFORM_BUF_ALIGNMENT);
+  if (!m_uniform_buffer->ReserveMemory(used + MAX_UNIFORM_BUFFER_SIZE, DK_UNIFORM_BUF_ALIGNMENT))
+  {
+    SubmitCommandBuffer(false, "out of uniform space");
+    if (!m_uniform_buffer->ReserveMemory(used + MAX_UNIFORM_BUFFER_SIZE, DK_UNIFORM_BUF_ALIGNMENT))
+      Panic("Failed to allocate uniform space.");
+  }
+  return m_uniform_buffer->GetCurrentHostPointer();
+}
+
+void Deko3DDevice::UnmapUniformBuffer(u32 size)
+{
+  DkGpuAddr addr = m_uniform_buffer->GetCurrentPointer();
+  m_uniform_buffer->CommitMemory(size);
+  dk::CmdBuf cmd = GetCurrentCommandBuffer();
+  // Streamed UBOBlock at binding=0 per shadergen.cpp.
+  cmd.bindUniformBuffer(DkStage_Vertex, 0, addr, size);
+  cmd.bindUniformBuffer(DkStage_Fragment, 0, addr, size);
+}
+
+void Deko3DDevice::PushUniformBuffer(const void* data, u32 data_size)
+{
+  DebugAssert(data_size < UNIFORM_PUSH_CONSTANTS_SIZE);
+  dk::CmdBuf cmd = GetCurrentCommandBuffer();
+  cmd.pushConstants(m_general_heap.GPUPointer(m_push_buffer), m_push_buffer.size, 0, data_size, data);
+}
+
+void Deko3DDevice::PrepareTextures()
+{
+  if (!m_textures_dirty)
+    return;
+
+  u32 textures_dirty = m_textures_dirty;
+
+  if (m_current_pipeline->GetLayout() == GPUPipeline::Layout::MultiTextureAndPushConstants ||
+      m_current_pipeline->GetLayout() == GPUPipeline::Layout::MultiTextureAndUBO)
+  {
+    m_textures_dirty = 0;
+  }
+  else
+  {
+    textures_dirty &= 1;
+    m_textures_dirty &= ~1u;
+    if (textures_dirty == 0)
+      return;
+  }
+
+  CommandBuffer& frame_resources = m_frame_resources[m_current_frame];
+  dk::ImageDescriptor* image_descriptors =
+    m_general_heap.CPUPointer<dk::ImageDescriptor>(frame_resources.image_descriptors);
+  dk::SamplerDescriptor* sampler_descriptors =
+    m_general_heap.CPUPointer<dk::SamplerDescriptor>(frame_resources.sampler_descriptors);
+
+  dk::CmdBuf cmdbuf = GetCurrentCommandBuffer();
+
+  std::array<DkResHandle, GPUDevice::MAX_TEXTURE_SAMPLERS> handles{};
+
+  const u32 first_dirty = CountTrailingZeros(textures_dirty);
+  const u32 last_dirty = 31u - CountLeadingZeros(textures_dirty);
+
+  if (m_current_pipeline->GetLayout() == GPUPipeline::Layout::SingleTextureBufferAndPushConstants)
+  {
+    Deko3DTextureBuffer* texbuf = m_current_texture_buffer;
+    if (texbuf)
+    {
+      if (texbuf->GetDescriptorFence() != GetCurrentFenceCounter())
+      {
+        u32 idx = frame_resources.next_image_descriptor++;
+        AssertMsg(idx < MAX_COMBINED_IMAGE_SAMPLER_DESCRIPTORS_PER_FRAME, "Out of image descriptors");
+        dk::ImageView view{texbuf->GetImage()};
+        image_descriptors[idx].initialize(view);
+        texbuf->setDescriptorIdx(idx);
+        texbuf->SetDescriptorFence(GetCurrentFenceCounter());
+      }
+      handles[0] = dkMakeImageHandle(texbuf->GetDescriptorIdx());
+    }
+  }
+  else
+  {
+    Assert(last_dirty < MAX_TEXTURE_SAMPLERS);
+
+    for (u32 i = first_dirty; i <= last_dirty; i++)
+    {
+      Deko3DTexture* texture = m_current_textures[i];
+      if (!texture)
+      {
+        continue;
+      }
+
+      bool tex_repop = false, smp_repop = false;
+      if (texture->GetDescriptorFence() != GetCurrentFenceCounter())
+      {
+        u32 idx = frame_resources.next_image_descriptor++;
+        AssertMsg(idx < MAX_COMBINED_IMAGE_SAMPLER_DESCRIPTORS_PER_FRAME, "Out of image descriptors");
+        std::memcpy(&image_descriptors[idx], &texture->GetDescriptor(), sizeof(dk::ImageDescriptor));
+        texture->setDescriptorIdx(idx);
+        texture->SetDescriptorFence(GetCurrentFenceCounter());
+        tex_repop = true;
+      }
+
+      Deko3DSampler* sampler = m_current_samplers[i];
+      DebugAssert(sampler);
+      if (sampler->GetDescriptorFence() != GetCurrentFenceCounter())
+      {
+        u32 idx = frame_resources.next_sampler_descriptor++;
+        AssertMsg(idx < MAX_COMBINED_IMAGE_SAMPLER_DESCRIPTORS_PER_FRAME, "Out of sampler descriptors");
+        std::memcpy(&sampler_descriptors[idx], &sampler->GetDescriptor(), sizeof(dk::SamplerDescriptor));
+        sampler->setDescriptorIdx(idx);
+        sampler->SetDescriptorFence(GetCurrentFenceCounter());
+        smp_repop = true;
+      }
+
+      handles[i] = dkMakeTextureHandle(texture->GetDescriptorIdx(), sampler->GetDescriptorIdx());
+    }
+  }
+
+  cmdbuf.bindTextures(DkStage_Fragment, first_dirty,
+                      dk::detail::ArrayProxy<const u32>(last_dirty - first_dirty + 1, &handles[first_dirty]));
+}
+
+void Deko3DDevice::SetRenderTargets(GPUTexture* const* rts, u32 num_rts, GPUTexture* ds,
+                                    GPUPipeline::RenderPassFlag /*flags*/)
+{
+  bool changed = (m_num_current_render_targets != num_rts || m_current_depth_target != ds);
+  bool needs_ds_clear = (ds && ds->IsClearedOrInvalidated());
+  bool needs_rt_clear = false;
+
+  dk::CmdBuf command_buffer = GetCurrentCommandBuffer();
+
+  m_current_depth_target = static_cast<Deko3DTexture*>(ds);
+  if (m_current_depth_target)
+    m_current_depth_target->SetBarrierCounter(m_barrier_counter);
+
+  for (u32 i = 0; i < num_rts; i++)
+  {
+    Deko3DTexture* const dt = static_cast<Deko3DTexture*>(rts[i]);
+    changed |= (m_current_render_targets[i] != dt);
+    m_current_render_targets[i] = dt;
+    needs_rt_clear |= dt->IsClearedOrInvalidated();
+    dt->SetBarrierCounter(m_barrier_counter);
+  }
+  for (u32 i = num_rts; i < m_num_current_render_targets; i++)
+    m_current_render_targets[i] = nullptr;
+  m_num_current_render_targets = num_rts;
+
+  if (changed)
+  {
+    GPUDevice::GetStatistics().num_render_passes++;
+
+    DkImageView color_targets[MAX_RENDER_TARGETS];
+    const DkImageView* color_target_ptrs[MAX_RENDER_TARGETS] = {nullptr};
+    for (u32 i = 0; i < num_rts; i++)
+    {
+      color_targets[i] = dk::ImageView{static_cast<Deko3DTexture*>(rts[i])->GetImage()};
+      color_target_ptrs[i] = &color_targets[i];
+    }
+
+    DkImageView depth_target;
+    if (ds)
+      depth_target = dk::ImageView{static_cast<Deko3DTexture*>(ds)->GetImage()};
+
+    command_buffer.bindRenderTargets(dk::detail::ArrayProxy<const DkImageView* const>(num_rts, color_target_ptrs),
+                                     ds ? &depth_target : nullptr);
+  }
+
+  if (needs_rt_clear)
+  {
+    for (u32 i = 0; i < num_rts; i++)
+    {
+      Deko3DTexture* const dt = static_cast<Deko3DTexture*>(rts[i]);
+      if (dt->IsClearedOrInvalidated())
+        CommitRTClearInFB(dt, i);
+    }
+  }
+
+  if (needs_ds_clear)
+    CommitRTClearInFB(static_cast<Deko3DTexture*>(ds), 0);
+}
+
+void Deko3DDevice::SetTextureSampler(u32 slot, GPUTexture* texture, GPUSampler* sampler)
+{
+  Deko3DTexture* T = texture ? static_cast<Deko3DTexture*>(texture) : m_null_texture.get();
+  Deko3DSampler* S = static_cast<Deko3DSampler*>(sampler ? sampler : m_nearest_sampler);
+  if (m_current_textures[slot] != T || m_current_samplers[slot] != S)
+  {
+    m_current_textures[slot] = T;
+    m_current_samplers[slot] = S;
+  }
+
+  if (texture)
+    CommitClear(GetCurrentCommandBuffer(), T);
+
+  m_textures_dirty |= 1u << slot;
+}
+
+void Deko3DDevice::SetTextureBuffer(u32 slot, GPUTextureBuffer* buffer)
+{
+  DebugAssert(slot == 0);
+  if (m_current_texture_buffer == buffer)
+    return;
+
+  m_current_texture_buffer = static_cast<Deko3DTextureBuffer*>(buffer);
+  m_textures_dirty |= 1u;
+}
+
+void Deko3DDevice::SetViewport(const GSVector4i rc)
+{
+  if (m_last_viewport.eq(rc))
+    return;
+  m_last_viewport = rc;
+  UpdateViewport();
+}
+
+void Deko3DDevice::SetScissor(const GSVector4i rc)
+{
+  if (m_last_scissor.eq(rc))
+    return;
+  m_last_scissor = rc;
+  UpdateScissor();
+}
+
+void Deko3DDevice::UpdateViewport()
+{
+  dk::CmdBuf cmd = GetCurrentCommandBuffer();
+  DkViewport vp{static_cast<float>(m_last_viewport.left),
+                static_cast<float>(m_last_viewport.top),
+                static_cast<float>(m_last_viewport.width()),
+                static_cast<float>(m_last_viewport.height()),
+                0.0f,
+                1.0f};
+  cmd.setViewports(0, {vp});
+}
+
+void Deko3DDevice::UpdateScissor()
+{
+  dk::CmdBuf cmd = GetCurrentCommandBuffer();
+  DkScissor sc;
+  sc.x = static_cast<u32>(m_last_scissor.left);
+  sc.y = static_cast<u32>(m_last_scissor.top);
+  sc.width = static_cast<u32>(m_last_scissor.width());
+  sc.height = static_cast<u32>(m_last_scissor.height());
+  cmd.setScissors(0, {sc});
+}
+
+void Deko3DDevice::Draw(u32 vertex_count, u32 base_vertex)
+{
+  PrepareTextures();
+  GPUDevice::GetStatistics().num_draws++;
+  GetCurrentCommandBuffer().draw(m_current_pipeline->GetTopology(), vertex_count, 1, base_vertex, 0);
+}
+
+void Deko3DDevice::DrawWithPushConstants(u32 vertex_count, u32 base_vertex, const void* push_constants,
+                                         u32 push_constants_size)
+{
+  PushUniformBuffer(push_constants, push_constants_size);
+  Draw(vertex_count, base_vertex);
+}
+
+void Deko3DDevice::DrawIndexed(u32 index_count, u32 base_index, u32 base_vertex)
+{
+  PrepareTextures();
+  GPUDevice::GetStatistics().num_draws++;
+  GetCurrentCommandBuffer().drawIndexed(m_current_pipeline->GetTopology(), index_count, 1, base_index, base_vertex, 0);
+}
+
+void Deko3DDevice::DrawIndexedWithPushConstants(u32 index_count, u32 base_index, u32 base_vertex,
+                                                const void* push_constants, u32 push_constants_size)
+{
+  PushUniformBuffer(push_constants, push_constants_size);
+  DrawIndexed(index_count, base_index, base_vertex);
+}
+
+void Deko3DDevice::Dispatch(u32, u32, u32, u32, u32, u32) {}
+void Deko3DDevice::DispatchWithPushConstants(u32, u32, u32, u32, u32, u32, const void*, u32) {}
+
+GPUPresentResult Deko3DDevice::BeginPresent(GPUSwapChain* swap_chain, u32 clear_color)
+{
+  if (!swap_chain)
+    return GPUPresentResult::SkipPresent;
+
+  auto* sc = static_cast<Deko3DSwapChain*>(swap_chain);
+  sc->AcquireNextImage();
+  sc->ReleaseImage();
+
+  Deko3DTexture* image = sc->GetCurrentImage();
+  ClearRenderTarget(image, clear_color);
+  GPUTexture* rts[1] = {image};
+  SetRenderTargets(rts, 1, nullptr);
+  SetScissor(GSVector4i(0, 0, image->GetWidth(), image->GetHeight()));
+  SetViewport(GSVector4i(0, 0, image->GetWidth(), image->GetHeight()));
+  return GPUPresentResult::OK;
+}
+
+void Deko3DDevice::EndPresent(GPUSwapChain* swap_chain, bool, u64)
+{
+  SubmitCommandBuffer(static_cast<Deko3DSwapChain*>(swap_chain));
+  MoveToNextCommandBuffer();
+  TrimTexturePool();
+}
+
+void Deko3DDevice::SubmitPresent(GPUSwapChain*) {}
+
+bool Deko3DDevice::SetGPUTimingEnabled(bool) { return false; }
+float Deko3DDevice::GetAndResetAccumulatedGPUTime() { return 0.0f; }
+
+// --- Deko3DSwapChain ---------------------------------------------------------
+
+Deko3DSwapChain::Deko3DSwapChain(const WindowInfo& wi, GPUVSyncMode vsync_mode, dk::Swapchain swapchain,
+                                 std::array<std::unique_ptr<Deko3DTexture>, NUM_SWAPCHAIN_IMAGES>& images)
+  : GPUSwapChain(wi, vsync_mode), m_swapchain(swapchain), m_images(std::move(images))
+{
+}
+
+Deko3DSwapChain::~Deko3DSwapChain()
+{
+  if (m_swapchain)
+    m_swapchain.destroy();
+  for (auto& img : m_images)
+  {
+    if (img)
+      img->Destroy(false);
+  }
+}
+
+std::unique_ptr<Deko3DSwapChain> Deko3DSwapChain::Create(const WindowInfo& wi, GPUVSyncMode vsync_mode, Error* error)
+{
+  auto& dev = Deko3DDevice::GetInstance();
+
+  std::array<std::unique_ptr<Deko3DTexture>, NUM_SWAPCHAIN_IMAGES> images;
+  std::array<const DkImage*, NUM_SWAPCHAIN_IMAGES> dk_images;
+  for (size_t i = 0; i < NUM_SWAPCHAIN_IMAGES; i++)
+  {
+    images[i] = Deko3DTexture::Create(wi.surface_width, wi.surface_height, 1, 1, 1, GPUTexture::Type::RenderTarget,
+                                      GPUTextureFormat::RGBA8,
+                                      DkImageFlags_UsageRender | DkImageFlags_UsagePresent | DkImageFlags_HwCompression);
+    if (!images[i])
+    {
+      Error::SetStringView(error, "Failed to create swap chain image");
+      return nullptr;
+    }
+    dk_images[i] = &images[i]->GetImage();
+  }
+
+  dk::Swapchain sc = dk::SwapchainMaker{dev.GetDkDevice(), wi.window_handle, dk_images}.create();
+  return std::unique_ptr<Deko3DSwapChain>(new Deko3DSwapChain(wi, vsync_mode, sc, images));
+}
+
+void Deko3DSwapChain::AcquireNextImage()
+{
+  m_current_slot = Deko3DDevice::GetInstance().GetDkQueue().acquireImage(m_swapchain);
+}
+
+void Deko3DSwapChain::PresentImage()
+{
+  Deko3DDevice::GetInstance().GetDkQueue().presentImage(m_swapchain, m_current_slot);
+}
+
+void Deko3DSwapChain::ReleaseImage() {}
+
+bool Deko3DSwapChain::ResizeBuffers(u32 new_width, u32 new_height, Error* error)
+{
+  m_window_info.surface_width = new_width;
+  m_window_info.surface_height = new_height;
+  return true;
+}
+
+bool Deko3DSwapChain::SetVSyncMode(GPUVSyncMode mode, Error* error)
+{
+  m_vsync_mode = mode;
+  return true;
+}
+PATCHEND
+mkdir -p 'src/util'
+# Add: src/util/deko3d_device.h
+cat > 'src/util/deko3d_device.h' <<'PATCHEND'
+// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-License-Identifier: CC-BY-NC-ND-4.0
+
+#pragma once
+
+#include "gpu_device.h"
+
+#include "deko3d_memory_heap.h"
+
+#include <array>
+#include <atomic>
+#include <deque>
+#include <memory>
+#include <tuple>
+#include <vector>
+
+#include <deko3d.hpp>
+
+class Deko3DPipeline;
+class Deko3DSampler;
+class Deko3DStreamBuffer;
+class Deko3DSwapChain;
+class Deko3DTexture;
+class Deko3DTextureBuffer;
+
+class Deko3DDevice final : public GPUDevice
+{
+  friend Deko3DTexture;
+  friend Deko3DTextureBuffer;
+
+public:
+  enum : u32
+  {
+    NUM_COMMAND_BUFFERS = 3,
+    COMMAND_BUFFER_INIT = 0,
+    COMMAND_BUFFER_REGULAR = 1,
+    COMMAND_BUFFER_TYPES = 2,
+  };
+
+  Deko3DDevice();
+  ~Deko3DDevice() override;
+
+  ALWAYS_INLINE static Deko3DDevice& GetInstance() { return *static_cast<Deko3DDevice*>(g_gpu_device.get()); }
+  static Deko3DStreamBuffer* GetTextureUploadBuffer();
+
+  ALWAYS_INLINE dk::Device& GetDkDevice() { return m_device; }
+  ALWAYS_INLINE dk::Queue& GetDkQueue() { return m_queue; }
+
+  // If the embedder owns a dk::Device (e.g. RA's deko3d driver via the
+  // libretro_deko3d HW render interface), it must call this BEFORE
+  // GPUDevice::Create. The next Deko3DDevice will borrow this handle
+  // instead of calling dk::DeviceMaker{}.create(). Required because
+  // libretro_deko3d.h states: "Allocating a private DkDevice is permitted
+  // but its DkMemBlocks will not be visible to the frontend." dk3dtest's
+  // libretro core demonstrates the working shape: g_gpu.device = iface->device.
+  static void SetExternalDevice(DkDevice device);
+
+  ALWAYS_INLINE Deko3DMemoryHeap& GetGeneralHeap() { return m_general_heap; }
+  ALWAYS_INLINE Deko3DMemoryHeap& GetTextureHeap() { return m_texture_heap; }
+  ALWAYS_INLINE Deko3DMemoryHeap& GetShaderHeap() { return m_shader_heap; }
+
+  ALWAYS_INLINE u32 GetCurrentFrameIndex() const { return m_current_frame; }
+  ALWAYS_INLINE DkFence* GetFrameFence(u32 idx) { return &m_frame_resources[idx].fence; }
+  // Per-slot release fence: signaled by the libretro frontend (RA) after it
+  // finishes sampling the display texture for this slot. Goose's NEXT use of
+  // the same slot waits on it to avoid overwriting an atlas RA is still
+  // reading. valid flag guards the first-rotation case where the fence has
+  // never been signaled.
+  ALWAYS_INLINE DkFence* GetReleaseFence(u32 idx) { return &m_frame_resources[idx].release_fence; }
+  ALWAYS_INLINE bool IsReleaseFenceValid(u32 idx) const { return m_frame_resources[idx].release_fence_valid; }
+  ALWAYS_INLINE void MarkReleaseFenceValid(u32 idx) { m_frame_resources[idx].release_fence_valid = true; }
+  ALWAYS_INLINE u64 GetCurrentFenceCounter() const { return m_next_fence_counter; }
+  ALWAYS_INLINE u64 GetCompletedFenceCounter() const { return m_completed_fence_counter; }
+  ALWAYS_INLINE u64 GetCurrentBarrierCounter() const { return m_barrier_counter; }
+  ALWAYS_INLINE void IncreaseBarrierCounter() { m_barrier_counter++; }
+
+  void WaitForFenceCounter(u64 counter);
+  void DeferedFree(Deko3DMemoryHeap& heap, Deko3DMemoryHeap::Allocation alloc);
+
+  void UnbindPipeline(Deko3DPipeline* pipeline);
+  void UnbindTexture(Deko3DTexture* tex);
+  void UnbindTextureBuffer(Deko3DTextureBuffer* buf);
+  void UnbindTextureSampler(Deko3DSampler* sampler);
+
+  void SubmitCommandBuffer(bool wait, const char* reason, ...);
+  void SubmitCommandBuffer(bool wait_for_completion);
+  dk::CmdBuf GetCurrentCommandBuffer();
+  dk::CmdBuf GetCurrentInitCommandBuffer();
+  void AddCommandBufferMemory(dk::CmdBuf cmdbuf, size_t min_size);
+
+  void CommitClear(dk::CmdBuf cmdbuf, Deko3DTexture* tex);
+  void CommitRTClearInFB(Deko3DTexture* tex, u32 idx);
+
+  // GPUDevice overrides
+  std::string GetDriverInfo() const override;
+
+  void FlushCommands() override;
+  void WaitForGPUIdle() override;
+
+  std::unique_ptr<GPUSwapChain> CreateSwapChain(const WindowInfo& wi, GPUVSyncMode vsync_mode,
+                                                const ExclusiveFullscreenMode* exclusive_fullscreen_mode,
+                                                std::optional<bool> exclusive_fullscreen_control,
+                                                Error* error) override;
+  std::unique_ptr<GPUTexture> CreateTexture(u32 width, u32 height, u32 layers, u32 levels, u32 samples,
+                                            GPUTexture::Type type, GPUTextureFormat format, GPUTexture::Flags flags,
+                                            const void* data = nullptr, u32 data_stride = 0,
+                                            Error* error = nullptr) override;
+  std::unique_ptr<GPUSampler> CreateSampler(const GPUSampler::Config& config, Error* error = nullptr) override;
+  std::unique_ptr<GPUTextureBuffer> CreateTextureBuffer(GPUTextureBuffer::Format format, u32 size_in_elements,
+                                                        Error* error = nullptr) override;
+
+  std::unique_ptr<GPUDownloadTexture> CreateDownloadTexture(u32 width, u32 height, GPUTextureFormat format,
+                                                            Error* error = nullptr) override;
+  std::unique_ptr<GPUDownloadTexture> CreateDownloadTexture(u32 width, u32 height, GPUTextureFormat format,
+                                                            void* memory, size_t memory_size, u32 memory_stride,
+                                                            Error* error = nullptr) override;
+
+  bool SupportsTextureFormat(GPUTextureFormat format) const override;
+  void CopyTextureRegion(GPUTexture* dst, u32 dst_x, u32 dst_y, u32 dst_layer, u32 dst_level, GPUTexture* src,
+                         u32 src_x, u32 src_y, u32 src_layer, u32 src_level, u32 width, u32 height) override;
+  void ResolveTextureRegion(GPUTexture* dst, u32 dst_x, u32 dst_y, u32 dst_layer, u32 dst_level, GPUTexture* src,
+                            u32 src_x, u32 src_y, u32 width, u32 height) override;
+  void ClearRenderTarget(GPUTexture* t, u32 c) override;
+  void ClearDepth(GPUTexture* t, float d) override;
+  void InvalidateRenderTarget(GPUTexture* t) override;
+
+  std::unique_ptr<GPUShader> CreateShaderFromBinary(GPUShaderStage stage, std::span<const u8> data,
+                                                    Error* error) override;
+  std::unique_ptr<GPUShader> CreateShaderFromSource(GPUShaderStage stage, GPUShaderLanguage language,
+                                                    std::string_view source, const char* entry_point,
+                                                    DynamicHeapArray<u8>* out_binary, Error* error) override;
+  std::unique_ptr<GPUPipeline> CreatePipeline(const GPUPipeline::GraphicsConfig& config, Error* error) override;
+  std::unique_ptr<GPUPipeline> CreatePipeline(const GPUPipeline::ComputeConfig& config, Error* error) override;
+
+#ifdef ENABLE_GPU_OBJECT_NAMES
+  void PushDebugGroup(const char* name) override;
+  void PopDebugGroup() override;
+  void InsertDebugMessage(const char* msg) override;
+#endif
+
+  void MapVertexBuffer(u32 vertex_size, u32 vertex_count, void** map_ptr, u32* map_space,
+                       u32* map_base_vertex) override;
+  void UnmapVertexBuffer(u32 vertex_size, u32 vertex_count) override;
+  void MapIndexBuffer(u32 index_count, DrawIndex** map_ptr, u32* map_space, u32* map_base_index) override;
+  void UnmapIndexBuffer(u32 used_index_count) override;
+  void* MapUniformBuffer(u32 size) override;
+  void UnmapUniformBuffer(u32 size) override;
+  void SetRenderTargets(GPUTexture* const* rts, u32 num_rts, GPUTexture* ds,
+                        GPUPipeline::RenderPassFlag feedback_loop = GPUPipeline::NoRenderPassFlags) override;
+  void SetPipeline(GPUPipeline* pipeline) override;
+  void SetTextureSampler(u32 slot, GPUTexture* texture, GPUSampler* sampler) override;
+  void SetTextureBuffer(u32 slot, GPUTextureBuffer* buffer) override;
+  void SetViewport(const GSVector4i rc) override;
+  void SetScissor(const GSVector4i rc) override;
+  void Draw(u32 vertex_count, u32 base_vertex) override;
+  void DrawWithPushConstants(u32 vertex_count, u32 base_vertex, const void* push_constants,
+                             u32 push_constants_size) override;
+  void DrawIndexed(u32 index_count, u32 base_index, u32 base_vertex) override;
+  void DrawIndexedWithPushConstants(u32 index_count, u32 base_index, u32 base_vertex, const void* push_constants,
+                                    u32 push_constants_size) override;
+  void Dispatch(u32 threads_x, u32 threads_y, u32 threads_z, u32 group_size_x, u32 group_size_y,
+                u32 group_size_z) override;
+  void DispatchWithPushConstants(u32 threads_x, u32 threads_y, u32 threads_z, u32 group_size_x, u32 group_size_y,
+                                 u32 group_size_z, const void* push_constants, u32 push_constants_size) override;
+
+  GPUPresentResult BeginPresent(GPUSwapChain* swap_chain, u32 clear_color) override;
+  void EndPresent(GPUSwapChain* swap_chain, bool explicit_present, u64 present_time) override;
+  void SubmitPresent(GPUSwapChain* swap_chain) override;
+
+  bool SetGPUTimingEnabled(bool enabled) override;
+  float GetAndResetAccumulatedGPUTime() override;
+
+protected:
+  bool CreateDeviceAndMainSwapChain(std::string_view adapter, CreateFlags create_flags, const WindowInfo& wi,
+                                    GPUVSyncMode vsync_mode, const ExclusiveFullscreenMode* exclusive_fullscreen_mode,
+                                    std::optional<bool> exclusive_fullscreen_control, Error* error) override;
+  void DestroyDevice() override;
+
+private:
+  bool CreateBuffers();
+  bool CreateCommandBuffers();
+
+  s32 IsRenderTargetBound(const GPUTexture* tex) const;
+
+  void MoveToNextCommandBuffer();
+  void BeginCommandBuffer(u32 idx);
+  void WaitForCommandBufferCompletion(u32 index);
+  void SubmitCommandBuffer();
+  void SubmitCommandBuffer(Deko3DSwapChain* present_swap_chain);
+
+  void PushUniformBuffer(const void* data, u32 data_size);
+  void PrepareTextures();
+  void UpdateViewport();
+  void UpdateScissor();
+  void CreateNullTexture();
+
+  void ApplyRasterizationState(GPUPipeline::RasterizationState rs);
+  void ApplyDepthState(GPUPipeline::DepthState ds);
+  void ApplyBlendState(GPUPipeline::BlendState bs);
+
+  dk::Device m_device;
+  bool m_owns_device = false;
+  dk::Queue m_queue;
+
+  Deko3DMemoryHeap m_general_heap;
+  Deko3DMemoryHeap m_texture_heap;
+  Deko3DMemoryHeap m_shader_heap;
+
+  std::unique_ptr<Deko3DStreamBuffer> m_vertex_buffer;
+  std::unique_ptr<Deko3DStreamBuffer> m_index_buffer;
+  std::unique_ptr<Deko3DStreamBuffer> m_uniform_buffer;
+  std::unique_ptr<Deko3DStreamBuffer> m_texture_upload_buffer;
+
+  Deko3DMemoryHeap::Allocation m_push_buffer = {};
+
+  struct CommandBuffer
+  {
+    std::array<dk::UniqueCmdBuf, COMMAND_BUFFER_TYPES> command_buffers;
+    std::array<std::vector<Deko3DMemoryHeap::Allocation>, COMMAND_BUFFER_TYPES> command_memory;
+    Deko3DMemoryHeap::Allocation image_descriptors;
+    Deko3DMemoryHeap::Allocation sampler_descriptors;
+    u32 next_image_descriptor = 0;
+    u32 next_sampler_descriptor = 0;
+    dk::Fence fence;
+    dk::Fence release_fence;
+    bool release_fence_valid = false;
+    u64 fence_counter = 0;
+    bool init_buffer_used = false;
+  };
+  std::array<CommandBuffer, NUM_COMMAND_BUFFERS> m_frame_resources;
+  std::deque<std::tuple<u64, std::reference_wrapper<Deko3DMemoryHeap>, Deko3DMemoryHeap::Allocation>> m_cleanup_objects;
+
+  u32 m_current_frame = 0;
+  u64 m_next_fence_counter = 1;
+  u64 m_completed_fence_counter = 0;
+  u64 m_barrier_counter = 0;
+
+  std::unique_ptr<Deko3DTexture> m_null_texture;
+
+  GSVector4i m_last_viewport = {};
+  GSVector4i m_last_scissor = GSVector4i::cxpr(0, 0, 1, 1);
+
+  Deko3DPipeline* m_current_pipeline = nullptr;
+  GPUPipeline::BlendState m_last_blend_state = {};
+  GPUPipeline::DepthState m_last_depth_state = {};
+  GPUPipeline::RasterizationState m_last_rasterization_state = {};
+  std::array<Deko3DTexture*, MAX_TEXTURE_SAMPLERS> m_current_textures = {};
+  std::array<Deko3DSampler*, MAX_TEXTURE_SAMPLERS> m_current_samplers = {};
+  Deko3DTextureBuffer* m_current_texture_buffer = nullptr;
+  std::array<Deko3DTexture*, MAX_RENDER_TARGETS> m_current_render_targets = {};
+  Deko3DTexture* m_current_depth_target = nullptr;
+  u32 m_num_current_render_targets = 0;
+  u32 m_textures_dirty = 0;
+};
+
+class Deko3DSwapChain final : public GPUSwapChain
+{
+public:
+  static constexpr size_t NUM_SWAPCHAIN_IMAGES = 2;
+
+  ~Deko3DSwapChain() override;
+
+  static std::unique_ptr<Deko3DSwapChain> Create(const WindowInfo& wi, GPUVSyncMode vsync_mode, Error* error);
+
+  ALWAYS_INLINE Deko3DTexture* GetCurrentImage() { return m_images[m_current_slot].get(); }
+
+  bool ResizeBuffers(u32 new_width, u32 new_height, Error* error) override;
+  bool SetVSyncMode(GPUVSyncMode mode, Error* error) override;
+
+  void AcquireNextImage();
+  void PresentImage();
+  void ReleaseImage();
+
+private:
+  Deko3DSwapChain(const WindowInfo& wi, GPUVSyncMode vsync_mode, dk::Swapchain swapchain,
+                  std::array<std::unique_ptr<Deko3DTexture>, NUM_SWAPCHAIN_IMAGES>& images);
+
+  dk::Swapchain m_swapchain;
+  int m_current_slot = 0;
+
+  std::array<std::unique_ptr<Deko3DTexture>, NUM_SWAPCHAIN_IMAGES> m_images;
+};
+
+PATCHEND
+mkdir -p 'src/util'
+# Add: src/util/deko3d_memory_heap.cpp
+cat > 'src/util/deko3d_memory_heap.cpp' <<'PATCHEND'
+// Copyright 2016 Dolphin Emulator Project
+// Copyright 2020 DuckStation Emulator Project
+// Licensed under GPLv2+
+// Refer to the LICENSE file included
+
+#include "deko3d_memory_heap.h"
+#include "deko3d_device.h"
+
+#include "common/align.h"
+#include "common/assert.h"
+
+#include <cstdio>
+#include <cstring>
+
+void Deko3DMemoryHeap::BlockListPushFront(Block*& head, Block* block)
+{
+  if (head)
+  {
+    DebugAssert(head->prev == nullptr);
+    head->prev = block;
+  }
+
+  block->prev = nullptr;
+  block->next = head;
+  head = block;
+}
+
+Deko3DMemoryHeap::Block* Deko3DMemoryHeap::BlockListPopFront(Block*& head)
+{
+  Block* result = head;
+  DebugAssertMsg(result, "popping from empty block list");
+
+  head = result->next;
+  if (head)
+    head->prev = nullptr;
+
+  return result;
+}
+
+void Deko3DMemoryHeap::BlockListRemove(Block*& head, Block* block)
+{
+  DebugAssert((head == block) == !block->prev);
+  if (!block->prev)
+    head = block->next;
+
+  if (block->prev)
+    block->prev->next = block->next;
+  if (block->next)
+    block->next->prev = block->prev;
+}
+
+void Deko3DMemoryHeap::MapSizeToSecondLevel(uint32_t size, uint32_t& fl, uint32_t& sl)
+{
+  DebugAssertMsg(size >= 32, "block smaller than 32 bytes? Maybe freeing uninitialized block?");
+  fl = 31 - __builtin_clz(size);
+  sl = (size - (1 << fl)) >> (fl - 5);
+}
+
+void Deko3DMemoryHeap::MarkFree(Block* block)
+{
+  DebugAssert(!block->free);
+  block->free = true;
+  uint32_t fl, sl;
+  MapSizeToSecondLevel(block->size, fl, sl);
+
+  BlockListPushFront(m_second_free_list[(fl - 5) * 32 + sl], block);
+
+  m_first_free_list |= 1 << (fl - 5);
+  m_second_free_list_bits[fl - 5] |= 1 << sl;
+}
+
+void Deko3DMemoryHeap::UnmarkFree(Block* block)
+{
+  DebugAssert(block->free);
+  block->free = false;
+  uint32_t fl, sl;
+  MapSizeToSecondLevel(block->size, fl, sl);
+
+  BlockListRemove(m_second_free_list[(fl - 5) * 32 + sl], block);
+
+  if (!m_second_free_list[(fl - 5) * 32 + sl])
+  {
+    m_second_free_list_bits[fl - 5] &= ~(1 << sl);
+
+    if (m_second_free_list_bits[fl - 5] == 0)
+      m_first_free_list &= ~(1 << (fl - 5));
+  }
+}
+
+// makes a new block to the right and returns it
+Deko3DMemoryHeap::Block* Deko3DMemoryHeap::SplitBlockRight(Block* block, uint32_t offset)
+{
+  DebugAssert(!block->free);
+  DebugAssert(offset < block->size);
+  Block* newBlock = BlockListPopFront(m_block_pool_unused);
+
+  newBlock->offset = block->offset + offset;
+  newBlock->size = block->size - offset;
+  newBlock->sibling_left = block;
+  newBlock->sibling_right = block->sibling_right;
+  newBlock->free = false;
+  if (newBlock->sibling_right)
+  {
+    DebugAssert(newBlock->sibling_right->sibling_left == block);
+    newBlock->sibling_right->sibling_left = newBlock;
+  }
+
+  block->size -= newBlock->size;
+  block->sibling_right = newBlock;
+
+  return newBlock;
+}
+
+Deko3DMemoryHeap::Block* Deko3DMemoryHeap::MergeBlocksLeft(Block* block, Block* other)
+{
+  DebugAssert(block->sibling_right == other);
+  DebugAssert(other->sibling_left == block);
+  DebugAssert(!block->free);
+  DebugAssert(!other->free);
+  DebugAssert(block->offset + block->size == other->offset);
+  block->size += other->size;
+  block->sibling_right = other->sibling_right;
+  if (block->sibling_right)
+  {
+    DebugAssert(block->sibling_right->sibling_left == other);
+    block->sibling_right->sibling_left = block;
+  }
+
+  BlockListPushFront(m_block_pool_unused, other);
+
+  return block;
+}
+
+Deko3DMemoryHeap::Deko3DMemoryHeap() = default;
+
+Deko3DMemoryHeap::~Deko3DMemoryHeap()
+{
+  Destroy();
+}
+
+bool Deko3DMemoryHeap::Create(uint32_t size, uint32_t flags, uint32_t blockPoolSize)
+{
+  DebugAssert((size & (DK_MEMBLOCK_ALIGNMENT - 1)) == 0 && "block size not properly aligned");
+  uint32_t sizeLog2 = 31 - __builtin_clz(size);
+  if (((uint32_t)1 << sizeLog2) > size)
+    sizeLog2++; // round up to the next power of two
+  DebugAssert(sizeLog2 >= 5);
+
+  m_memblock = dk::MemBlockMaker{Deko3DDevice::GetInstance().GetDkDevice(), size}
+                 .setFlags(flags)
+                 .create();
+
+  if (!m_memblock)
+    return false;
+
+  uint32_t rows = sizeLog2 - 4; // remove rows below 32 bytes and round up to next
+
+  m_second_free_list_bits = new uint32_t[rows];
+  memset(m_second_free_list_bits, 0, rows * 4);
+  m_second_free_list = new Block*[rows * 32];
+  memset(m_second_free_list, 0, rows * 32 * 8);
+
+  m_block_pool = new Block[blockPoolSize];
+  memset(m_block_pool, 0, sizeof(Block) * blockPoolSize);
+  for (uint32_t i = 0; i < blockPoolSize; i++)
+    BlockListPushFront(m_block_pool_unused, &m_block_pool[i]);
+
+  // insert heap into the free list
+  Block* heap = BlockListPopFront(m_block_pool_unused);
+  heap->offset = 0;
+  heap->size = size - (flags & DkMemBlockFlags_Code ? DK_SHADER_CODE_UNUSABLE_SIZE : 0);
+  heap->sibling_left = nullptr;
+  heap->sibling_right = nullptr;
+  heap->free = false;
+  MarkFree(heap);
+
+  return true;
+}
+
+void Deko3DMemoryHeap::Destroy()
+{
+  if (IsValid())
+  {
+    m_memblock.destroy();
+    m_memblock = {};
+
+    delete[] m_block_pool;
+    delete[] m_second_free_list;
+    delete[] m_second_free_list_bits;
+  }
+}
+
+Deko3DMemoryHeap::Allocation Deko3DMemoryHeap::Alloc(uint32_t size, uint32_t align)
+{
+  DebugAssert(IsValid());
+  DebugAssert(size > 0);
+  DebugAssertMsg((align & (align - 1)) == 0, "alignment must be a power of two");
+  // minimum alignment (and thus size) is 32 bytes
+  align = std::max((uint32_t)32, align);
+  size = Common::AlignUp(size, align);
+
+
+  uint32_t fl, sl;
+  MapSizeToSecondLevel(size + (align > 32 ? align : 0), fl, sl);
+
+  uint32_t secondFreeListBits = m_second_free_list_bits[fl - 5] & (0xFFFFFFFF << (sl + 1));
+
+  if (sl == 31 || secondFreeListBits == 0)
+  {
+    uint32_t firstFreeListBits = m_first_free_list & (0xFFFFFFFF << (fl - 5 + 1));
+    DebugAssertMsg(firstFreeListBits, "out of memory :(");
+
+    fl = __builtin_ctz(firstFreeListBits) + 5;
+    secondFreeListBits = m_second_free_list_bits[fl - 5];
+    DebugAssert(secondFreeListBits);
+    sl = __builtin_ctz(secondFreeListBits);
+  }
+  DebugAssertMsg(secondFreeListBits, "out of memory :(");
+
+  sl = __builtin_ctz(secondFreeListBits);
+
+  Block* block = m_second_free_list[(fl - 5) * 32 + sl];
+  UnmarkFree(block);
+
+  // align within the block
+  if ((block->offset & (align - 1)) > 0)
+  {
+    DebugAssert(align > 32);
+    Block* newBlock = SplitBlockRight(block, ((block->offset + align - 1) & ~(align - 1)) - block->offset);
+    MarkFree(block);
+    block = newBlock;
+  }
+  // put remaining data back
+  if (block->size > size)
+  {
+    MarkFree(SplitBlockRight(block, size));
+  }
+
+  DebugAssert((block->offset & (align - 1)) == 0);
+  DebugAssert(block->size == size);
+  return {static_cast<uint32_t>(block - m_block_pool), block->offset, block->size};
+}
+
+void Deko3DMemoryHeap::Free(Allocation allocation)
+{
+  DebugAssert(IsValid());
+  Block* block = &m_block_pool[allocation.blockIdx];
+  DebugAssert(!block->free);
+
+  if (block->sibling_left && block->sibling_left->free)
+  {
+    UnmarkFree(block->sibling_left);
+    block = MergeBlocksLeft(block->sibling_left, block);
+  }
+  if (block->sibling_right && block->sibling_right->free)
+  {
+    UnmarkFree(block->sibling_right);
+    block = MergeBlocksLeft(block, block->sibling_right);
+  }
+
+  MarkFree(block);
+}
+PATCHEND
+mkdir -p 'src/util'
+# Add: src/util/deko3d_memory_heap.h
+cat > 'src/util/deko3d_memory_heap.h' <<'PATCHEND'
+// Copyright 2016 Dolphin Emulator Project
+// Copyright 2020 DuckStation Emulator Project
+// Licensed under GPLv2+
+// Refer to the LICENSE file included.
+#pragma once
+
+#include "common/types.h"
+
+#include <stdint.h>
+
+#include <deko3d.hpp>
+
+class Deko3DMemoryHeap
+{
+public:
+  Deko3DMemoryHeap();
+  ~Deko3DMemoryHeap();
+
+  bool Create(u32 size, u32 flags, u32 block_pool_size);
+  void Destroy();
+
+  dk::MemBlock GetMemBlock() { return m_memblock; }
+
+  ALWAYS_INLINE bool IsValid() { return m_memblock; }
+
+  struct Allocation
+  {
+    u32 blockIdx = 0;
+    u32 offset = 0, size = 0;
+  };
+
+  Allocation Alloc(u32 size, u32 align);
+  void Free(Allocation allocation);
+
+  DkGpuAddr GPUPointer(const Allocation& allocation) { return m_memblock.getGpuAddr() + allocation.offset; }
+
+  template<typename T>
+  ALWAYS_INLINE T* CPUPointer(const Allocation& allocation)
+  {
+    return reinterpret_cast<T*>(static_cast<uint8_t*>(m_memblock.getCpuAddr()) + allocation.offset);
+  }
+
+private:
+  struct Block
+  {
+    bool free;
+    u32 offset, size;
+    // it would probably be smarter to make those indices because that's smaller
+    Block *sibling_left, *sibling_right;
+    Block *next, *prev;
+  };
+
+  // this is a home made memory allocator based on TLSF (http://www.gii.upv.es/tlsf/)
+  // I hope it doesn't have to many bugs
+
+  // Free List
+  u32 m_first_free_list = 0;
+  u32* m_second_free_list_bits;
+  Block** m_second_free_list;
+
+  Block* m_block_pool;
+  Block* m_block_pool_unused = nullptr;
+
+  u32 m_used = 0;
+
+  void BlockListPushFront(Block*& head, Block* block);
+  Block* BlockListPopFront(Block*& head);
+  void BlockListRemove(Block*& head, Block* block);
+  void MapSizeToSecondLevel(u32 size, u32& fl, u32& sl);
+  void MarkFree(Block* block);
+  void UnmarkFree(Block* block);
+  Block* SplitBlockRight(Block* block, u32 offset);
+  Block* MergeBlocksLeft(Block* block, Block* other);
+
+  dk::MemBlock m_memblock;
+};
+PATCHEND
+mkdir -p 'src/util'
+# Add: src/util/deko3d_pipeline.cpp
+cat > 'src/util/deko3d_pipeline.cpp' <<'PATCHEND'
+#include "deko3d_pipeline.h"
+
+#include "common/assert.h"
+#include "common/error.h"
+#include "common/log.h"
+
+#include <array>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <span>
+#include <string>
+
+#include <uam.h>
+
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
+
+#include "deko3d_device.h"
+
+LOG_CHANNEL(GPUDevice);
+
+// UAM debug log — called by patched UAM instead of fprintf(stderr).
+// UAM's --redefine-syms prefixes these to __uam_uam_debug_*; we provide both.
+static constexpr bool UAM_DEBUG_VERBOSE = false;
+static void uam_emit(const char* buf)
+{
+  if constexpr (!UAM_DEBUG_VERBOSE)
+    return;
+  INFO_LOG("UAM: {}", buf);
+#ifdef __SWITCH__
+  char line[320];
+  int n = std::snprintf(line, sizeof(line), "UAM: %s\n", buf);
+  if (n > 0)
+    svcOutputDebugString(line, (n < (int)sizeof(line)) ? n : (int)sizeof(line) - 1);
+#endif
+}
+extern "C" {
+void uam_debug_log(const char* msg)
+{
+  if constexpr (!UAM_DEBUG_VERBOSE) return;
+  uam_emit(msg);
+}
+void uam_debug_printf(const char* fmt, ...)
+{
+  if constexpr (!UAM_DEBUG_VERBOSE) return;
+  char buf[256];
+  std::va_list ap;
+  va_start(ap, fmt);
+  std::vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  uam_emit(buf);
+}
+void __uam_uam_debug_log(const char* msg)
+{
+  if constexpr (!UAM_DEBUG_VERBOSE) return;
+  uam_emit(msg);
+}
+void __uam_uam_debug_printf(const char* f, ...)
+{
+  if constexpr (!UAM_DEBUG_VERBOSE) return;
+  char buf[256]; std::va_list ap; va_start(ap, f);
+  std::vsnprintf(buf, sizeof(buf), f, ap); va_end(ap);
+  uam_emit(buf);
+}
+}
+
+Deko3DInternalShader::Deko3DInternalShader(const dk::Shader& shader, Deko3DMemoryHeap::Allocation memory)
+  : shader(shader), memory(memory)
+{
+}
+
+Deko3DInternalShader::~Deko3DInternalShader()
+{
+  DebugAssert(shader.isValid());
+  Deko3DDevice::GetInstance().DeferedFree(Deko3DDevice::GetInstance().GetShaderHeap(), memory);
+}
+
+Deko3DShader::Deko3DShader(GPUShaderStage stage, dk::Shader shader, Deko3DMemoryHeap::Allocation memory)
+  : GPUShader(stage), m_internal_shader(std::make_shared<Deko3DInternalShader>(shader, memory))
+{
+}
+
+// https://github.com/switchbrew/switch-examples/blob/master/graphics/deko3d/deko_examples/source/SampleFramework/CShader.cpp#L7
+struct DkshHeader
+{
+  uint32_t magic;     // DKSH_MAGIC
+  uint32_t header_sz; // sizeof(DkshHeader)
+  uint32_t control_sz;
+  uint32_t code_sz;
+  uint32_t programs_off;
+  uint32_t num_programs;
+};
+
+std::unique_ptr<GPUShader> Deko3DDevice::CreateShaderFromBinary(GPUShaderStage stage, std::span<const u8> data,
+                                                                Error* error)
+{
+  Deko3DMemoryHeap& shader_heap = GetShaderHeap();
+  auto memory = shader_heap.Alloc(static_cast<u32>(data.size_bytes()), DK_SHADER_CODE_ALIGNMENT);
+  std::memcpy(shader_heap.CPUPointer<void>(memory), data.data(), data.size_bytes());
+
+  dk::Shader shader;
+  dk::ShaderMaker{shader_heap.GetMemBlock(), memory.offset}.initialize(shader);
+
+  return std::unique_ptr<Deko3DShader>(new Deko3DShader(stage, shader, memory));
+}
+
+std::unique_ptr<GPUShader> Deko3DDevice::CreateShaderFromSource(GPUShaderStage stage, GPUShaderLanguage language,
+                                                                std::string_view source, const char* entry_point,
+                                                                DynamicHeapArray<u8>* out_binary, Error* error)
+{
+  if (stage >= GPUShaderStage::MaxCount)
+  {
+    Error::SetStringFmt(error, "Unknown shader stage {}", static_cast<u32>(stage));
+    return {};
+  }
+  if (std::strcmp(entry_point, "main") != 0)
+  {
+    Error::SetStringFmt(error, "Entry point must be 'main', got '{}'", entry_point);
+    return {};
+  }
+
+  static constexpr uam_pipeline_stage to_uam_stage[] = {
+    uam_pipeline_stage_vertex, uam_pipeline_stage_fragment,
+    uam_pipeline_stage_geometry, uam_pipeline_stage_compute};
+
+  std::string source_nt(source);
+
+  u8* shader_out = nullptr;
+  u32 shader_size = 0;
+  INFO_LOG("UAM: calling uam_compileDksh ({} stage, {} bytes)...",
+           static_cast<u32>(stage) < 4 ? "vfgc"[static_cast<u32>(stage)] : '?', source_nt.size());
+  const bool ok = uam_compileDksh(to_uam_stage[static_cast<u32>(stage)], source_nt.c_str(), 3, &shader_out, &shader_size);
+  INFO_LOG("UAM: uam_compileDksh returned ok={} size={}", ok, shader_size);
+  if (!ok)
+  {
+    static constexpr const char* stage_str[] = {"vertex", "fragment", "geometry", "compute"};
+    ERROR_LOG("Failed to compile {} shader ({} bytes):\n{}",
+              stage_str[static_cast<u32>(stage)], source_nt.size(), source_nt);
+    Error::SetStringView(error, "uam_compileDksh failed");
+    return {};
+  }
+
+  INFO_LOG("UAM: creating shader from binary ({} bytes)...", shader_size);
+  std::span<const u8> bin{static_cast<const u8*>(shader_out), static_cast<size_t>(shader_size)};
+  auto result = CreateShaderFromBinary(stage, bin, error);
+  INFO_LOG("UAM: CreateShaderFromBinary {}", result ? "OK" : "FAILED");
+
+  if (out_binary)
+  {
+    out_binary->resize(shader_size);
+    std::memcpy(out_binary->data(), shader_out, shader_size);
+  }
+
+  std::free(shader_out);
+  return result;
+}
+
+Deko3DPipeline::~Deko3DPipeline()
+{
+  Deko3DDevice::GetInstance().UnbindPipeline(this);
+}
+
+void Deko3DPipeline::SetDebugName(std::string_view name)
+{
+  // not implementable
+}
+
+Deko3DPipeline::Deko3DPipeline(Layout layout, const RasterizationState& rs, const DepthState& ds, const BlendState& bs,
+                               DkPrimitive topology, u32 num_attribs,
+                               const std::array<DkVtxAttribState, VertexAttribute::MaxAttributes>& attribs, u32 stride,
+                               std::shared_ptr<Deko3DInternalShader> vtx_shader,
+                               std::shared_ptr<Deko3DInternalShader> frg_shader,
+                               std::shared_ptr<Deko3DInternalShader> geom_shader)
+  : m_layout(layout), m_blend_state(bs), m_rasterization_state(rs), m_depth_state(ds), m_topology(topology),
+    m_vertex_shader(vtx_shader), m_fragment_shader(frg_shader), m_geometry_shader(geom_shader), m_attributes(attribs),
+    m_num_attributes(static_cast<u8>(num_attribs)), m_stride(static_cast<u8>(stride))
+{
+}
+
+std::unique_ptr<GPUPipeline> Deko3DDevice::CreatePipeline(const GPUPipeline::GraphicsConfig& config, Error* error)
+{
+  static constexpr std::array<DkPrimitive, static_cast<u32>(GPUPipeline::Primitive::MaxCount)> primitives = {{
+    DkPrimitive_Points,
+    DkPrimitive_Lines,
+    DkPrimitive_Triangles,
+    DkPrimitive_TriangleStrip,
+  }};
+
+  std::shared_ptr<Deko3DInternalShader> vtx_shader =
+    static_cast<Deko3DShader*>(config.vertex_shader)->GetInternalShader();
+  std::shared_ptr<Deko3DInternalShader> frg_shader =
+    static_cast<Deko3DShader*>(config.fragment_shader)->GetInternalShader();
+  std::shared_ptr<Deko3DInternalShader> geom_shader =
+    config.geometry_shader ? static_cast<Deko3DShader*>(config.geometry_shader)->GetInternalShader() : nullptr;
+
+  struct VAMapping
+  {
+    DkVtxAttribType type;
+    std::array<DkVtxAttribSize, 4> sizes;
+  };
+  static constexpr std::array<VAMapping, static_cast<u8>(GPUPipeline::VertexAttribute::Type::MaxCount)>
+    format_mapping = {{
+      {DkVtxAttribType_Float, {DkVtxAttribSize_1x32, DkVtxAttribSize_2x32, DkVtxAttribSize_3x32, DkVtxAttribSize_4x32}},
+      {DkVtxAttribType_Uint,  {DkVtxAttribSize_1x8,  DkVtxAttribSize_2x8,  DkVtxAttribSize_3x8,  DkVtxAttribSize_4x8}},
+      {DkVtxAttribType_Sint,  {DkVtxAttribSize_1x8,  DkVtxAttribSize_2x8,  DkVtxAttribSize_3x8,  DkVtxAttribSize_4x8}},
+      {DkVtxAttribType_Unorm, {DkVtxAttribSize_1x8,  DkVtxAttribSize_2x8,  DkVtxAttribSize_3x8,  DkVtxAttribSize_4x8}},
+      {DkVtxAttribType_Uint,  {DkVtxAttribSize_1x16, DkVtxAttribSize_2x16, DkVtxAttribSize_3x16, DkVtxAttribSize_4x16}},
+      {DkVtxAttribType_Sint,  {DkVtxAttribSize_1x16, DkVtxAttribSize_2x16, DkVtxAttribSize_3x16, DkVtxAttribSize_4x16}},
+      {DkVtxAttribType_Unorm, {DkVtxAttribSize_1x16, DkVtxAttribSize_2x16, DkVtxAttribSize_3x16, DkVtxAttribSize_4x16}},
+      {DkVtxAttribType_Uint,  {DkVtxAttribSize_1x32, DkVtxAttribSize_2x32, DkVtxAttribSize_3x32, DkVtxAttribSize_4x32}},
+      {DkVtxAttribType_Sint,  {DkVtxAttribSize_1x32, DkVtxAttribSize_2x32, DkVtxAttribSize_3x32, DkVtxAttribSize_4x32}},
+    }};
+
+  std::array<DkVtxAttribState, GPUPipeline::VertexAttribute::MaxAttributes> attributes{};
+  for (size_t i = 0; i < config.input_layout.vertex_attributes.size(); i++)
+  {
+    const GPUPipeline::VertexAttribute& va = config.input_layout.vertex_attributes[i];
+    const VAMapping& m = format_mapping[static_cast<u8>(va.type.GetValue())];
+    attributes[i] = DkVtxAttribState{0, 0, va.offset, m.sizes[va.components.GetValue() - 1], m.type, 0};
+  }
+
+  auto p = std::unique_ptr<GPUPipeline>(
+    new Deko3DPipeline(config.layout, config.rasterization, config.depth, config.blend,
+                       primitives[static_cast<u32>(config.primitive)],
+                       static_cast<u32>(config.input_layout.vertex_attributes.size()), attributes,
+                       config.input_layout.vertex_stride, vtx_shader, frg_shader, geom_shader));
+  return p;
+}
+
+std::unique_ptr<GPUPipeline> Deko3DDevice::CreatePipeline(const GPUPipeline::ComputeConfig& config, Error* error)
+{
+  Error::SetStringView(error, "Compute pipelines not supported on deko3d backend");
+  return nullptr;
+}
+
+void Deko3DDevice::ApplyRasterizationState(GPUPipeline::RasterizationState rs)
+{
+  if (m_last_rasterization_state == rs)
+    return;
+
+  static constexpr std::array<DkFace, static_cast<u32>(GPUPipeline::CullMode::MaxCount)> map_cull_face{
+    {DkFace_None, DkFace_Front, DkFace_Back}};
+
+  dk::RasterizerState d3d_state;
+  d3d_state.setCullMode(map_cull_face[static_cast<u32>(rs.cull_mode.GetValue())]);
+
+  dk::CmdBuf cmdbuf = GetCurrentCommandBuffer();
+  cmdbuf.bindRasterizerState(d3d_state);
+
+  m_last_rasterization_state = rs;
+}
+
+void Deko3DDevice::ApplyDepthState(GPUPipeline::DepthState ds)
+{
+  if (m_last_depth_state == ds)
+    return;
+
+  static constexpr std::array<DkCompareOp, static_cast<u32>(GPUPipeline::DepthFunc::MaxCount)> map_func{
+    {DkCompareOp_Never, DkCompareOp_Always, DkCompareOp_Less, DkCompareOp_Lequal, DkCompareOp_Greater,
+     DkCompareOp_Gequal, DkCompareOp_Equal}};
+
+  dk::DepthStencilState d3d_state;
+  d3d_state.setDepthTestEnable(ds.depth_test != GPUPipeline::DepthFunc::Always || ds.depth_write)
+    .setDepthCompareOp(map_func[static_cast<u32>(ds.depth_test.GetValue())])
+    .setDepthWriteEnable(ds.depth_write);
+
+  dk::CmdBuf cmdbuf = GetCurrentCommandBuffer();
+  cmdbuf.bindDepthStencilState(d3d_state);
+
+  m_last_depth_state = ds;
+}
+
+void Deko3DDevice::ApplyBlendState(GPUPipeline::BlendState bs)
+{
+  static constexpr std::array<DkBlendFactor, static_cast<u32>(GPUPipeline::BlendFunc::MaxCount)> blend_mapping = {{
+    DkBlendFactor_Zero,
+    DkBlendFactor_One,
+    DkBlendFactor_SrcColor,
+    DkBlendFactor_InvSrcColor,
+    DkBlendFactor_DstColor,
+    DkBlendFactor_InvDstColor,
+    DkBlendFactor_SrcAlpha,
+    DkBlendFactor_InvSrcAlpha,
+    DkBlendFactor_Src1Alpha,
+    DkBlendFactor_InvSrc1Alpha,
+    DkBlendFactor_DstAlpha,
+    DkBlendFactor_InvDstAlpha,
+    DkBlendFactor_ConstColor,
+    DkBlendFactor_InvConstColor,
+  }};
+
+  static constexpr std::array<DkBlendOp, static_cast<u32>(GPUPipeline::BlendOp::MaxCount)> op_mapping = {{
+    DkBlendOp_Add, DkBlendOp_Sub, DkBlendOp_RevSub, DkBlendOp_Min, DkBlendOp_Max,
+  }};
+
+  if (bs == m_last_blend_state)
+    return;
+
+  dk::CmdBuf cmdbuf = GetCurrentCommandBuffer();
+
+  if (bs.enable != m_last_blend_state.enable)
+  {
+    dk::ColorState dk_colorstate;
+    dk_colorstate.setBlendEnable(0, bs.enable);
+    cmdbuf.bindColorState(dk_colorstate);
+  }
+
+  if (bs.enable)
+  {
+    if (bs.blend_factors != m_last_blend_state.blend_factors || bs.blend_ops != m_last_blend_state.blend_ops)
+    {
+      dk::BlendState dk_blendstate;
+      dk_blendstate
+        .setFactors(blend_mapping[static_cast<u8>(bs.src_blend.GetValue())],
+                    blend_mapping[static_cast<u8>(bs.dst_blend.GetValue())],
+                    blend_mapping[static_cast<u8>(bs.src_alpha_blend.GetValue())],
+                    blend_mapping[static_cast<u8>(bs.dst_alpha_blend.GetValue())])
+        .setOps(op_mapping[static_cast<u8>(bs.blend_op.GetValue())],
+                op_mapping[static_cast<u8>(bs.alpha_blend_op.GetValue())]);
+      cmdbuf.bindBlendStates(0, {dk_blendstate});
+    }
+
+    if (bs.constant != m_last_blend_state.constant)
+      cmdbuf.setBlendConst(bs.GetConstantRed(), bs.GetConstantGreen(), bs.GetConstantBlue(), bs.GetConstantAlpha());
+  }
+  else
+  {
+    bs.blend_factors.SetValue(m_last_blend_state.blend_factors);
+    bs.blend_ops.SetValue(m_last_blend_state.blend_ops);
+    bs.constant.SetValue(m_last_blend_state.constant);
+  }
+
+  if (bs.write_mask != m_last_blend_state.write_mask)
+  {
+    dk::ColorWriteState dk_colorwritestate;
+    dk_colorwritestate.setMask(0, bs.write_mask.GetValue());
+    cmdbuf.bindColorWriteState(dk_colorwritestate);
+  }
+
+  m_last_blend_state = bs;
+}
+
+void Deko3DDevice::SetPipeline(GPUPipeline* pipeline)
+{
+  if (pipeline == m_current_pipeline)
+    return;
+
+  Deko3DPipeline* const P = static_cast<Deko3DPipeline*>(pipeline);
+
+  m_textures_dirty |= 1;
+
+  ApplyRasterizationState(P->GetRasterizationState());
+  ApplyDepthState(P->GetDepthState());
+  ApplyBlendState(P->GetBlendState());
+
+  dk::CmdBuf cmdbuf = GetCurrentCommandBuffer();
+  cmdbuf.bindVtxAttribState(dk::detail::ArrayProxy<const DkVtxAttribState>(P->m_num_attributes, &P->m_attributes[0]));
+  cmdbuf.bindVtxBufferState({{P->m_stride, 0}});
+
+  if (P->m_geometry_shader)
+    cmdbuf.bindShaders(DkStageFlag_GraphicsMask,
+                       {&P->m_vertex_shader->shader, &P->m_geometry_shader->shader, &P->m_fragment_shader->shader});
+  else
+    cmdbuf.bindShaders(DkStageFlag_GraphicsMask, {&P->m_vertex_shader->shader, &P->m_fragment_shader->shader});
+
+  m_current_pipeline = P;
+}
+PATCHEND
+mkdir -p 'src/util'
+# Add: src/util/deko3d_pipeline.h
+cat > 'src/util/deko3d_pipeline.h' <<'PATCHEND'
+// SPDX-FileCopyrightText: 2019-2023 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-License-Identifier: (GPL-3.0 OR CC-BY-NC-ND-4.0)
+
+#pragma once
+
+#include "gpu_device.h"
+
+#include "deko3d_memory_heap.h"
+
+#include <memory>
+
+#include <deko3d.hpp>
+
+class Deko3DDevice;
+
+struct Deko3DInternalShader
+{
+  Deko3DInternalShader(const dk::Shader& shader, Deko3DMemoryHeap::Allocation memory);
+  ~Deko3DInternalShader();
+
+  dk::Shader shader;
+  Deko3DMemoryHeap::Allocation memory;
+};
+
+class Deko3DShader final : public GPUShader
+{
+  friend Deko3DDevice;
+
+public:
+  ALWAYS_INLINE std::shared_ptr<Deko3DInternalShader> GetInternalShader() { return m_internal_shader; }
+
+  void SetDebugName(std::string_view name)
+  { /* not really implementable */
+  }
+
+private:
+  Deko3DShader(GPUShaderStage stage, dk::Shader shader, Deko3DMemoryHeap::Allocation memory);
+
+  std::shared_ptr<Deko3DInternalShader> m_internal_shader;
+};
+
+class Deko3DPipeline final : public GPUPipeline
+{
+  friend Deko3DDevice;
+
+public:
+  ~Deko3DPipeline() override;
+
+  void SetDebugName(std::string_view name);
+
+  ALWAYS_INLINE const RasterizationState& GetRasterizationState() const { return m_rasterization_state; }
+  ALWAYS_INLINE const DepthState& GetDepthState() const { return m_depth_state; }
+  ALWAYS_INLINE const BlendState& GetBlendState() const { return m_blend_state; }
+
+  DkPrimitive GetTopology() const { return m_topology; }
+  Layout GetLayout() const { return m_layout; }
+
+private:
+  Deko3DPipeline(Layout layout, const RasterizationState& rs, const DepthState& ds, const BlendState& bs,
+                 DkPrimitive topology, u32 num_attribs,
+                 const std::array<DkVtxAttribState, VertexAttribute::MaxAttributes>& attribs, u32 stride,
+                 std::shared_ptr<Deko3DInternalShader> vtx_shader, std::shared_ptr<Deko3DInternalShader> frg_shader,
+                 std::shared_ptr<Deko3DInternalShader> geom_shader);
+
+  Layout m_layout;
+  BlendState m_blend_state;
+  RasterizationState m_rasterization_state;
+  DepthState m_depth_state;
+  DkPrimitive m_topology;
+
+  std::shared_ptr<Deko3DInternalShader> m_vertex_shader, m_fragment_shader, m_geometry_shader;
+
+  std::array<DkVtxAttribState, VertexAttribute::MaxAttributes> m_attributes;
+  u8 m_num_attributes, m_stride;
+};
+PATCHEND
+mkdir -p 'src/util'
+# Add: src/util/deko3d_stream_buffer.cpp
+cat > 'src/util/deko3d_stream_buffer.cpp' <<'PATCHEND'
+#include "deko3d_stream_buffer.h"
+
+#include "deko3d_device.h"
+
+#include "common/align.h"
+#include "common/assert.h"
+#include "common/log.h"
+
+Deko3DStreamBuffer::Deko3DStreamBuffer(Deko3DMemoryHeap::Allocation buffer)
+{
+  m_current_offset = 0;
+  m_current_gpu_position = 0;
+  m_tracked_fences.clear();
+  m_buffer = buffer;
+  m_host_pointer = Deko3DDevice::GetInstance().GetGeneralHeap().CPUPointer<u8>(buffer);
+  m_pointer = Deko3DDevice::GetInstance().GetGeneralHeap().GPUPointer(buffer);
+}
+
+Deko3DStreamBuffer::~Deko3DStreamBuffer()
+{
+  Deko3DDevice& device = Deko3DDevice::GetInstance();
+  device.DeferedFree(device.GetGeneralHeap(), m_buffer);
+}
+
+std::unique_ptr<Deko3DStreamBuffer> Deko3DStreamBuffer::Create(u32 size)
+{
+  Deko3DMemoryHeap::Allocation buffer = Deko3DDevice::GetInstance().GetGeneralHeap().Alloc(size, 256);
+
+  return std::unique_ptr<Deko3DStreamBuffer>(new Deko3DStreamBuffer(buffer));
+}
+
+bool Deko3DStreamBuffer::ReserveMemory(u32 num_bytes, u32 alignment)
+{
+  const u32 required_bytes = num_bytes + alignment;
+
+  // Check for sane allocations
+  if (required_bytes > GetCurrentSize())
+  {
+    Panic("Stream buffer overflow");
+    return false;
+  }
+
+  UpdateGPUPosition();
+
+  // Is the GPU behind or up to date with our current offset?
+  if (m_current_offset >= m_current_gpu_position)
+  {
+    const u32 remaining_bytes = GetCurrentSize() - m_current_offset;
+    if (required_bytes <= remaining_bytes)
+    {
+      // Place at the current position, after the GPU position.
+      m_current_offset = Common::AlignUp(m_current_offset, alignment);
+      m_current_space = GetCurrentSize() - m_current_offset;
+      return true;
+    }
+
+    // Check for space at the start of the buffer
+    // We use < here because we don't want to have the case of m_current_offset ==
+    // m_current_gpu_position. That would mean the code above would assume the
+    // GPU has caught up to us, which it hasn't.
+    if (required_bytes < m_current_gpu_position)
+    {
+      // Reset offset to zero, since we're allocating behind the gpu now
+      m_current_offset = 0;
+      m_current_space = m_current_gpu_position - 1;
+      return true;
+    }
+  }
+
+  // Is the GPU ahead of our current offset?
+  if (m_current_offset < m_current_gpu_position)
+  {
+    // We have from m_current_offset..m_current_gpu_position space to use.
+    const u32 remaining_bytes = m_current_gpu_position - m_current_offset;
+    if (required_bytes < remaining_bytes)
+    {
+      // Place at the current position, since this is still behind the GPU.
+      m_current_offset = Common::AlignUp(m_current_offset, alignment);
+      m_current_space = m_current_gpu_position - m_current_offset - 1;
+      return true;
+    }
+  }
+
+  // Can we find a fence to wait on that will give us enough memory?
+  if (WaitForClearSpace(required_bytes))
+  {
+    const u32 align_diff = Common::AlignUp(m_current_offset, alignment) - m_current_offset;
+    m_current_offset += align_diff;
+    m_current_space -= align_diff;
+    return true;
+  }
+
+  // We tried everything we could, and still couldn't get anything. This means that too much space
+  // in the buffer is being used by the command buffer currently being recorded. Therefore, the
+  // only option is to execute it, and wait until it's done.
+  return false;
+}
+
+void Deko3DStreamBuffer::CommitMemory(u32 final_num_bytes)
+{
+  DebugAssert((m_current_offset + final_num_bytes) <= m_buffer.size);
+  DebugAssert(final_num_bytes <= m_current_space);
+
+  m_current_offset += final_num_bytes;
+  m_current_space -= final_num_bytes;
+  UpdateCurrentFencePosition();
+}
+
+void Deko3DStreamBuffer::UpdateCurrentFencePosition()
+{
+  // Has the offset changed since the last fence?
+  const u64 counter = Deko3DDevice::GetInstance().GetCurrentFenceCounter();
+  if (!m_tracked_fences.empty() && m_tracked_fences.back().first == counter)
+  {
+    // Still haven't executed a command buffer, so just update the offset.
+    m_tracked_fences.back().second = m_current_offset;
+    return;
+  }
+
+  // New buffer, so update the GPU position while we're at it.
+  m_tracked_fences.emplace_back(counter, m_current_offset);
+}
+
+void Deko3DStreamBuffer::UpdateGPUPosition()
+{
+  auto start = m_tracked_fences.begin();
+  auto end = start;
+
+  const u64 completed_counter = Deko3DDevice::GetInstance().GetCompletedFenceCounter();
+  while (end != m_tracked_fences.end() && completed_counter >= end->first)
+  {
+    m_current_gpu_position = end->second;
+    ++end;
+  }
+
+  if (start != end)
+  {
+    m_tracked_fences.erase(start, end);
+    if (m_current_offset == m_current_gpu_position)
+    {
+      // GPU is all caught up now.
+      m_current_offset = 0;
+      m_current_gpu_position = 0;
+      m_current_space = GetCurrentSize();
+    }
+  }
+}
+
+bool Deko3DStreamBuffer::WaitForClearSpace(u32 num_bytes)
+{
+  u32 new_offset = 0;
+  u32 new_space = 0;
+  u32 new_gpu_position = 0;
+
+  auto iter = m_tracked_fences.begin();
+  for (; iter != m_tracked_fences.end(); ++iter)
+  {
+    // Would this fence bring us in line with the GPU?
+    // This is the "last resort" case, where a command buffer execution has been forced
+    // after no additional data has been written to it, so we can assume that after the
+    // fence has been signaled the entire buffer is now consumed.
+    u32 gpu_position = iter->second;
+    if (m_current_offset == gpu_position)
+    {
+      new_offset = 0;
+      new_space = GetCurrentSize();
+      new_gpu_position = 0;
+      break;
+    }
+
+    // Assuming that we wait for this fence, are we allocating in front of the GPU?
+    if (m_current_offset > gpu_position)
+    {
+      // This would suggest the GPU has now followed us and wrapped around, so we have from
+      // m_current_position..m_size free, as well as and 0..gpu_position.
+      const u32 remaining_space_after_offset = GetCurrentSize() - m_current_offset;
+      if (remaining_space_after_offset >= num_bytes)
+      {
+        // Switch to allocating in front of the GPU, using the remainder of the buffer.
+        new_offset = m_current_offset;
+        new_space = GetCurrentSize() - m_current_offset;
+        new_gpu_position = gpu_position;
+        break;
+      }
+
+      // We can wrap around to the start, behind the GPU, if there is enough space.
+      // We use > here because otherwise we'd end up lining up with the GPU, and then the
+      // allocator would assume that the GPU has consumed what we just wrote.
+      if (gpu_position > num_bytes)
+      {
+        new_offset = 0;
+        new_space = gpu_position - 1;
+        new_gpu_position = gpu_position;
+        break;
+      }
+    }
+    else
+    {
+      // We're currently allocating behind the GPU. This would give us between the current
+      // offset and the GPU position worth of space to work with. Again, > because we can't
+      // align the GPU position with the buffer offset.
+      u32 available_space_inbetween = gpu_position - m_current_offset;
+      if (available_space_inbetween > num_bytes)
+      {
+        // Leave the offset as-is, but update the GPU position.
+        new_offset = m_current_offset;
+        new_space = available_space_inbetween - 1;
+        new_gpu_position = gpu_position;
+        break;
+      }
+    }
+  }
+
+  // Did any fences satisfy this condition?
+  // Has the command buffer been executed yet? If not, the caller should execute it.
+  if (iter == m_tracked_fences.end() || iter->first == Deko3DDevice::GetInstance().GetCurrentFenceCounter())
+    return false;
+
+  // Wait until this fence is signaled. This will fire the callback, updating the GPU position.
+  Deko3DDevice::GetInstance().WaitForFenceCounter(iter->first);
+  m_tracked_fences.erase(m_tracked_fences.begin(), m_current_offset == iter->second ? m_tracked_fences.end() : ++iter);
+  m_current_offset = new_offset;
+  m_current_space = new_space;
+  m_current_gpu_position = new_gpu_position;
+  return true;
+}
+PATCHEND
+mkdir -p 'src/util'
+# Add: src/util/deko3d_stream_buffer.h
+cat > 'src/util/deko3d_stream_buffer.h' <<'PATCHEND'
+#pragma once
+
+#include "common/types.h"
+
+#include "deko3d_memory_heap.h"
+#include <deque>
+#include <memory>
+
+class Deko3DDevice;
+
+class Deko3DStreamBuffer
+{
+public:
+  ~Deko3DStreamBuffer();
+
+  ALWAYS_INLINE bool IsValid() const { return m_buffer.size > 0; }
+  ALWAYS_INLINE Deko3DMemoryHeap::Allocation GetBuffer() const { return m_buffer; }
+  ALWAYS_INLINE const Deko3DMemoryHeap::Allocation* GetBufferPointer() const { return &m_buffer; }
+  ALWAYS_INLINE u8* GetHostPointer() const { return m_host_pointer; }
+  ALWAYS_INLINE u8* GetCurrentHostPointer() const { return m_host_pointer + m_current_offset; }
+  ALWAYS_INLINE u32 GetCurrentSize() const { return m_buffer.size; }
+  ALWAYS_INLINE u32 GetCurrentSpace() const { return m_current_space; }
+  ALWAYS_INLINE u32 GetCurrentOffset() const { return m_current_offset; }
+  ALWAYS_INLINE DkGpuAddr GetCurrentPointer() const { return m_pointer + m_current_offset; }
+  ALWAYS_INLINE DkGpuAddr GetPointer() const { return m_pointer; }
+
+  bool ReserveMemory(u32 num_bytes, u32 alignment);
+  void CommitMemory(u32 final_num_bytes);
+
+  void UpdateCurrentFencePosition();
+  void UpdateGPUPosition();
+
+  static std::unique_ptr<Deko3DStreamBuffer> Create(u32 size);
+private:
+  Deko3DStreamBuffer(Deko3DMemoryHeap::Allocation buffer);
+
+  // Waits for as many fences as needed to allocate num_bytes bytes from the buffer.
+  bool WaitForClearSpace(u32 num_bytes);
+
+  u32 m_current_offset = 0;
+  u32 m_current_space = 0;
+  u32 m_current_gpu_position = 0;
+  Deko3DMemoryHeap::Allocation m_buffer;
+
+  u8* m_host_pointer = nullptr;
+  DkGpuAddr m_pointer = DK_GPU_ADDR_INVALID;
+
+  // List of fences and the corresponding positions in the buffer
+  std::deque<std::pair<u64, u32>> m_tracked_fences;
+};
+PATCHEND
+mkdir -p 'src/util'
+# Add: src/util/deko3d_texture.cpp
+cat > 'src/util/deko3d_texture.cpp' <<'PATCHEND'
+// SPDX-FileCopyrightText: 2019-2024 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-License-Identifier: CC-BY-NC-ND-4.0
+
+#include "deko3d_texture.h"
+
+#include "deko3d_device.h"
+#include "deko3d_stream_buffer.h"
+
+#include "common/align.h"
+#include "common/assert.h"
+#include "common/log.h"
+#include "common/string_util.h"
+
+#include <cstdio>
+
+LOG_CHANNEL(GPUDevice);
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic error "-Wswitch-enum"
+static DkImageFormat ToDkImageFormat(GPUTextureFormat fmt)
+{
+  switch (fmt)
+  {
+    case GPUTextureFormat::Unknown: return DkImageFormat_None;
+    case GPUTextureFormat::RGBA8:   return DkImageFormat_RGBA8_Unorm;
+    case GPUTextureFormat::BGRA8:   return DkImageFormat_BGRA8_Unorm;
+    case GPUTextureFormat::RGB565:  return DkImageFormat_BGR565_Unorm;
+    case GPUTextureFormat::RGB5A1:  return DkImageFormat_BGR5A1_Unorm;
+    case GPUTextureFormat::A1BGR5:  return DkImageFormat_None;
+    case GPUTextureFormat::R8:      return DkImageFormat_R8_Unorm;
+    case GPUTextureFormat::D16:     return DkImageFormat_Z16;
+    case GPUTextureFormat::D24S8:   return DkImageFormat_Z24S8;
+    case GPUTextureFormat::D32F:    return DkImageFormat_ZF32;
+    case GPUTextureFormat::D32FS8:  return DkImageFormat_ZF32_X24S8;
+    case GPUTextureFormat::R16:     return DkImageFormat_R16_Unorm;
+    case GPUTextureFormat::R16I:    return DkImageFormat_R16_Sint;
+    case GPUTextureFormat::R16U:    return DkImageFormat_R16_Uint;
+    case GPUTextureFormat::R16F:    return DkImageFormat_R16_Float;
+    case GPUTextureFormat::R32I:    return DkImageFormat_R32_Sint;
+    case GPUTextureFormat::R32U:    return DkImageFormat_R32_Uint;
+    case GPUTextureFormat::R32F:    return DkImageFormat_R32_Float;
+    case GPUTextureFormat::RG8:     return DkImageFormat_RG8_Unorm;
+    case GPUTextureFormat::RG16:    return DkImageFormat_RG16_Unorm;
+    case GPUTextureFormat::RG16F:   return DkImageFormat_RG16_Float;
+    case GPUTextureFormat::RG32F:   return DkImageFormat_RG32_Float;
+    case GPUTextureFormat::RGBA16:  return DkImageFormat_RGBA16_Unorm;
+    case GPUTextureFormat::RGBA16F: return DkImageFormat_RGBA16_Float;
+    case GPUTextureFormat::RGBA32F: return DkImageFormat_RGBA32_Float;
+    case GPUTextureFormat::RGB10A2: return DkImageFormat_RGB10A2_Unorm;
+    case GPUTextureFormat::SRGBA8:  return DkImageFormat_RGBA8_Unorm_sRGB;
+    case GPUTextureFormat::BC1:     return DkImageFormat_RGBA_BC1;
+    case GPUTextureFormat::BC2:     return DkImageFormat_RGBA_BC2;
+    case GPUTextureFormat::BC3:     return DkImageFormat_RGBA_BC3;
+    case GPUTextureFormat::BC7:     return DkImageFormat_RGBA_BC7_Unorm;
+    case GPUTextureFormat::MaxCount: break;
+  }
+  return DkImageFormat_None;
+}
+
+bool Deko3DTextureFormatSupported(GPUTextureFormat fmt)
+{
+  switch (fmt)
+  {
+    case GPUTextureFormat::Unknown:
+    case GPUTextureFormat::A1BGR5:
+    case GPUTextureFormat::SRGBA8:
+    case GPUTextureFormat::BC1:
+    case GPUTextureFormat::BC2:
+    case GPUTextureFormat::BC3:
+    case GPUTextureFormat::BC7:
+    case GPUTextureFormat::MaxCount:
+      return false;
+    case GPUTextureFormat::RGBA8:
+    case GPUTextureFormat::BGRA8:
+    case GPUTextureFormat::RGB565:
+    case GPUTextureFormat::RGB5A1:
+    case GPUTextureFormat::R8:
+    case GPUTextureFormat::D16:
+    case GPUTextureFormat::D24S8:
+    case GPUTextureFormat::D32F:
+    case GPUTextureFormat::D32FS8:
+    case GPUTextureFormat::R16:
+    case GPUTextureFormat::R16I:
+    case GPUTextureFormat::R16U:
+    case GPUTextureFormat::R16F:
+    case GPUTextureFormat::R32I:
+    case GPUTextureFormat::R32U:
+    case GPUTextureFormat::R32F:
+    case GPUTextureFormat::RG8:
+    case GPUTextureFormat::RG16:
+    case GPUTextureFormat::RG16F:
+    case GPUTextureFormat::RG32F:
+    case GPUTextureFormat::RGBA16:
+    case GPUTextureFormat::RGBA16F:
+    case GPUTextureFormat::RGBA32F:
+    case GPUTextureFormat::RGB10A2:
+      return true;
+  }
+  return false;
+}
+#pragma GCC diagnostic pop
+
+std::unique_ptr<Deko3DTexture> Deko3DTexture::Create(u32 width, u32 height, u32 layers, u32 levels, u32 samples,
+                                                     Type type, GPUTextureFormat format, uint32_t flags)
+{
+  DkImageType dk_image_type;
+  if (layers > 1)
+    dk_image_type = samples > 1 ? DkImageType_2DMSArray : DkImageType_2DArray;
+  else
+    dk_image_type = samples > 1 ? DkImageType_2DMS : DkImageType_2D;
+
+  Deko3DDevice& dev = Deko3DDevice::GetInstance();
+
+  DkImageFormat dk_fmt = ToDkImageFormat(format);
+
+  dk::ImageLayout layout;
+  dk::ImageLayoutMaker{dev.GetDkDevice()}
+    .setDimensions(width, height, layers)
+    .setMipLevels(levels)
+    .setType(dk_image_type)
+    .setMsMode(static_cast<DkMsMode>(__builtin_ctz(samples) - 1))
+    .setFormat(dk_fmt)
+    .setFlags(flags)
+    .initialize(layout);
+
+  auto memory = dev.GetTextureHeap().Alloc(layout.getSize(), layout.getAlignment());
+
+  return std::unique_ptr<Deko3DTexture>(
+    new Deko3DTexture(width, height, layers, levels, samples, type, format, layout, memory));
+}
+
+Deko3DTexture::Deko3DTexture(u32 width, u32 height, u32 layers, u32 levels, u32 samples, Type type,
+                             GPUTextureFormat format, const dk::ImageLayout& layout,
+                             const Deko3DMemoryHeap::Allocation& memory)
+  : GPUTexture(static_cast<u16>(width), static_cast<u16>(height), static_cast<u8>(layers), static_cast<u8>(levels),
+               static_cast<u8>(samples), type, format, GPUTexture::Flags::None),
+    m_memory(memory)
+{
+  auto& heap = Deko3DDevice::GetInstance().GetTextureHeap();
+  m_image.initialize(layout, heap.GetMemBlock(), m_memory.offset);
+
+  dk::ImageView view{m_image};
+  m_descriptor.initialize(view);
+}
+
+Deko3DTexture::~Deko3DTexture()
+{
+  if (m_memory.size)
+    Destroy(true);
+}
+
+void Deko3DTexture::SetDebugName(std::string_view name)
+{
+  // not implementable
+}
+
+void Deko3DTexture::Destroy(bool defer)
+{
+  Deko3DDevice& dev = Deko3DDevice::GetInstance();
+  dev.UnbindTexture(this);
+
+  if (defer)
+    dev.DeferedFree(dev.GetTextureHeap(), m_memory);
+  else
+    dev.GetTextureHeap().Free(m_memory);
+
+  m_memory = {};
+}
+
+void Deko3DTexture::MakeReadyForSampling()
+{
+  Deko3DDevice& dev = Deko3DDevice::GetInstance();
+  if (dev.GetCurrentBarrierCounter() == m_barrier_counter)
+  {
+    dk::CmdBuf cmd = dev.GetCurrentCommandBuffer();
+    cmd.barrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
+    dev.IncreaseBarrierCounter();
+  }
+}
+
+dk::CmdBuf Deko3DTexture::GetCommandBufferForUpdate()
+{
+  return Deko3DDevice::GetInstance().GetCurrentCommandBuffer();
+}
+
+void Deko3DTexture::CopyTextureDataForUpload(void* dst, const void* src, u32 width, u32 height, u32 pitch,
+                                             u32 upload_pitch) const
+{
+  StringUtil::StrideMemCpy(dst, upload_pitch, src, pitch, GetPixelSize() * width, height);
+}
+
+Deko3DMemoryHeap::Allocation Deko3DTexture::AllocateUploadStagingBuffer(const void* data, u32 pitch, u32 upload_pitch,
+                                                                        u32 width, u32 height) const
+{
+  const u32 size = upload_pitch * height;
+  Deko3DDevice& dev = Deko3DDevice::GetInstance();
+  auto buf = dev.GetGeneralHeap().Alloc(size, DK_IMAGE_LINEAR_STRIDE_ALIGNMENT);
+
+  dev.DeferedFree(dev.GetGeneralHeap(), buf);
+
+  CopyTextureDataForUpload(dev.GetGeneralHeap().CPUPointer<void>(buf), data, width, height, pitch, upload_pitch);
+  return buf;
+}
+
+void Deko3DTexture::UpdateFromBuffer(dk::CmdBuf cmdbuf, u32 x, u32 y, u32 width, u32 height, u32 layer, u32 level,
+                                     u32 pitch, DkGpuAddr buffer)
+{
+  dk::ImageView view{m_image};
+  view.setMipLevels(level);
+  cmdbuf.copyBufferToImage(DkCopyBuf{buffer, pitch, 0}, view, DkImageRect{x, y, layer, width, height, 1});
+}
+
+bool Deko3DTexture::Update(u32 x, u32 y, u32 width, u32 height, const void* data, u32 pitch, u32 layer, u32 level)
+{
+  DebugAssert(layer < m_layers && level < m_levels);
+  DebugAssert((x + width) <= GetMipWidth(level) && (y + height) <= GetMipHeight(level));
+
+  const u32 upload_pitch = Common::AlignUpPow2(pitch, DK_IMAGE_LINEAR_STRIDE_ALIGNMENT);
+  const u32 required_size = height * upload_pitch;
+  Deko3DDevice& dev = Deko3DDevice::GetInstance();
+  Deko3DStreamBuffer* sb = dev.GetTextureUploadBuffer();
+
+  Deko3DMemoryHeap::Allocation buffer;
+  u32 buffer_offset;
+  if (required_size > (sb->GetCurrentSize() / 2))
+  {
+    buffer_offset = 0;
+    buffer = AllocateUploadStagingBuffer(data, pitch, upload_pitch, width, height);
+  }
+  else
+  {
+    if (!sb->ReserveMemory(required_size, DK_IMAGE_LINEAR_STRIDE_ALIGNMENT))
+    {
+      dev.SubmitCommandBuffer(false, "While waiting for %u bytes in texture upload buffer", required_size);
+      if (!sb->ReserveMemory(required_size, DK_IMAGE_LINEAR_STRIDE_ALIGNMENT))
+      {
+        ERROR_LOG("Failed to reserve texture upload memory ({} bytes).", required_size);
+        return false;
+      }
+    }
+    buffer = sb->GetBuffer();
+    buffer_offset = sb->GetCurrentOffset();
+    CopyTextureDataForUpload(sb->GetCurrentHostPointer(), data, width, height, pitch, upload_pitch);
+    sb->CommitMemory(required_size);
+  }
+
+  GPUDevice::GetStatistics().buffer_streamed += required_size;
+  GPUDevice::GetStatistics().num_uploads++;
+
+  dk::CmdBuf cmd = GetCommandBufferForUpdate();
+
+  if (m_type == Type::RenderTarget)
+  {
+    if (m_state == State::Cleared && (x != 0 || y != 0 || width != m_width || height != m_height))
+      dev.CommitClear(cmd, this);
+    else
+      m_state = State::Dirty;
+  }
+
+  UpdateFromBuffer(cmd, x, y, width, height, layer, level, upload_pitch,
+                   dev.GetGeneralHeap().GPUPointer(buffer) + buffer_offset);
+  return true;
+}
+
+bool Deko3DTexture::Map(void** map, u32* map_stride, u32 x, u32 y, u32 width, u32 height, u32 layer, u32 level)
+{
+  if ((x + width) > GetMipWidth(level) || (y + height) > GetMipHeight(level) || layer > m_layers || level > m_levels)
+    return false;
+
+  Deko3DDevice& dev = Deko3DDevice::GetInstance();
+  if (m_state == GPUTexture::State::Cleared && (x != 0 || y != 0 || width != m_width || height != m_height))
+    dev.CommitClear(GetCommandBufferForUpdate(), this);
+
+  const u32 aligned_pitch = Common::AlignUpPow2(width * GetPixelSize(), DK_IMAGE_LINEAR_STRIDE_ALIGNMENT);
+  const u32 req_size = height * aligned_pitch;
+  Deko3DStreamBuffer* sb = dev.GetTextureUploadBuffer();
+  if (req_size >= (sb->GetCurrentSize() / 2))
+    return false;
+
+  if (!sb->ReserveMemory(req_size, DK_IMAGE_LINEAR_STRIDE_ALIGNMENT))
+  {
+    dev.SubmitCommandBuffer(false, "While waiting for %u bytes in texture upload buffer", req_size);
+    if (!sb->ReserveMemory(req_size, DK_IMAGE_LINEAR_STRIDE_ALIGNMENT))
+      Panic("Failed to reserve texture upload memory");
+  }
+
+  *map = sb->GetCurrentHostPointer();
+  *map_stride = aligned_pitch;
+  m_map_x = static_cast<u16>(x);
+  m_map_y = static_cast<u16>(y);
+  m_map_width = static_cast<u16>(width);
+  m_map_height = static_cast<u16>(height);
+  m_map_layer = static_cast<u8>(layer);
+  m_map_level = static_cast<u8>(level);
+  m_state = GPUTexture::State::Dirty;
+  return true;
+}
+
+void Deko3DTexture::Unmap()
+{
+  Deko3DDevice& dev = Deko3DDevice::GetInstance();
+  Deko3DStreamBuffer* sb = dev.GetTextureUploadBuffer();
+  const u32 aligned_pitch = Common::AlignUpPow2(m_map_width * GetPixelSize(), DK_IMAGE_LINEAR_STRIDE_ALIGNMENT);
+  const u32 req_size = m_map_height * aligned_pitch;
+  const u32 offset = sb->GetCurrentOffset();
+  sb->CommitMemory(req_size);
+
+  GPUDevice::GetStatistics().buffer_streamed += req_size;
+  GPUDevice::GetStatistics().num_uploads++;
+
+  dk::CmdBuf cmd = GetCommandBufferForUpdate();
+  UpdateFromBuffer(cmd, m_map_x, m_map_y, m_map_width, m_map_height, m_map_layer, m_map_level, aligned_pitch,
+                   dev.GetGeneralHeap().GPUPointer(sb->GetBuffer()) + offset);
+
+  m_map_x = m_map_y = m_map_width = m_map_height = 0;
+  m_map_layer = m_map_level = 0;
+}
+
+// --- Sampler -----------------------------------------------------------------
+
+Deko3DSampler::Deko3DSampler(const dk::SamplerDescriptor& descriptor) : m_descriptor(descriptor) {}
+
+Deko3DSampler::~Deko3DSampler()
+{
+  Deko3DDevice::GetInstance().UnbindTextureSampler(this);
+}
+
+void Deko3DSampler::SetDebugName(std::string_view name) {}
+
+// --- Texture buffer ----------------------------------------------------------
+
+Deko3DTextureBuffer::Deko3DTextureBuffer(GPUTextureBuffer::Format format, u32 size_in_elements,
+                                         std::unique_ptr<Deko3DStreamBuffer> buffer, const dk::ImageLayout& layout)
+  : GPUTextureBuffer(format, size_in_elements), m_buffer(std::move(buffer))
+{
+  m_image.initialize(layout, Deko3DDevice::GetInstance().GetGeneralHeap().GetMemBlock(), m_buffer->GetBuffer().offset);
+}
+
+Deko3DTextureBuffer::~Deko3DTextureBuffer()
+{
+  Deko3DDevice::GetInstance().UnbindTextureBuffer(this);
+}
+
+void Deko3DTextureBuffer::SetDebugName(std::string_view name) {}
+
+void* Deko3DTextureBuffer::Map(u32 required_elements)
+{
+  const u32 esize = GetElementSize(m_format);
+  const u32 req_size = esize * required_elements;
+  if (!m_buffer->ReserveMemory(req_size, esize))
+  {
+    Deko3DDevice::GetInstance().SubmitCommandBuffer(false, "out of space in texture buffer");
+    if (!m_buffer->ReserveMemory(req_size, esize))
+      Panic("Failed to allocate texture buffer space.");
+  }
+  m_current_position = m_buffer->GetCurrentOffset() / esize;
+  return m_buffer->GetCurrentHostPointer();
+}
+
+void Deko3DTextureBuffer::Unmap(u32 used_elements)
+{
+  const u32 size = GetElementSize(m_format) * used_elements;
+  GPUDevice::GetStatistics().buffer_streamed += size;
+  GPUDevice::GetStatistics().num_uploads++;
+  m_buffer->CommitMemory(size);
+}
+
+// --- Download texture --------------------------------------------------------
+
+Deko3DDownloadTexture::Deko3DDownloadTexture(u32 width, u32 height, GPUTextureFormat format, bool is_imported,
+                                             Deko3DMemoryHeap::Allocation buffer, const u8* map_ptr, u32 map_pitch)
+  : GPUDownloadTexture(width, height, format, is_imported), m_buffer(buffer), m_copy_fence_counter(0)
+{
+  m_map_pointer = map_ptr;
+  m_current_pitch = map_pitch;
+}
+
+Deko3DDownloadTexture::~Deko3DDownloadTexture()
+{
+  Deko3DDevice::GetInstance().DeferedFree(Deko3DDevice::GetInstance().GetGeneralHeap(), m_buffer);
+}
+
+std::unique_ptr<Deko3DDownloadTexture> Deko3DDownloadTexture::Create(u32 width, u32 height, GPUTextureFormat format,
+                                                                     void* memory, size_t memory_size, u32 memory_pitch)
+{
+  DebugAssertMsg(!memory, "Importing buffer for download textures not supported on deko3D.");
+
+  Deko3DDevice& dev = Deko3DDevice::GetInstance();
+
+  const u32 map_pitch = Common::AlignUpPow2(GPUTexture::CalcUploadPitch(format, width),
+                                            static_cast<u32>(DK_IMAGE_LINEAR_STRIDE_ALIGNMENT));
+  const u32 buffer_size = map_pitch * height;
+
+  Deko3DMemoryHeap::Allocation buffer = dev.GetGeneralHeap().Alloc(buffer_size, DK_IMAGE_LINEAR_STRIDE_ALIGNMENT);
+
+  return std::unique_ptr<Deko3DDownloadTexture>(new Deko3DDownloadTexture(
+    width, height, format, false, buffer, dev.GetGeneralHeap().CPUPointer<u8>(buffer), map_pitch));
+}
+
+void Deko3DDownloadTexture::CopyFromTexture(u32 dst_x, u32 dst_y, GPUTexture* src, u32 src_x, u32 src_y, u32 width,
+                                            u32 height, u32 src_layer, u32 src_level, bool use_transfer_pitch)
+{
+  Deko3DTexture* T = static_cast<Deko3DTexture*>(src);
+  Deko3DDevice& dev = Deko3DDevice::GetInstance();
+  dk::CmdBuf cmdbuf = dev.GetCurrentCommandBuffer();
+
+
+  dev.CommitClear(cmdbuf, T);
+
+  GPUDevice::GetStatistics().num_downloads++;
+
+  dk::ImageView src_view{T->GetImage()};
+  if (T->GetFormat() == GPUTextureFormat::D16)
+    src_view.setFormat(DkImageFormat_R16_Uint);
+
+  cmdbuf.copyImageToBuffer(src_view, DkImageRect{src_x, src_y, 0, width, height, 1},
+                           DkCopyBuf{dev.GetGeneralHeap().GPUPointer(m_buffer) + dst_y * m_current_pitch +
+                                       dst_x * GPUTexture::GetPixelSize(m_format),
+                                     m_current_pitch, 0});
+  cmdbuf.barrier(DkBarrier_Primitives, DkInvalidateFlags_L2Cache);
+
+  m_copy_fence_counter = dev.GetCurrentFenceCounter();
+  m_needs_flush = true;
+}
+
+bool Deko3DDownloadTexture::Map(u32 x, u32 y, u32 width, u32 height)
+{
+  // persistently mapped
+  return true;
+}
+
+void Deko3DDownloadTexture::Unmap()
+{
+  // persistently mapped
+}
+
+void Deko3DDownloadTexture::Flush()
+{
+  if (!m_needs_flush)
+    return;
+
+  Deko3DDevice& dev = Deko3DDevice::GetInstance();
+  if (dev.GetCompletedFenceCounter() >= m_copy_fence_counter)
+  {
+    m_needs_flush = false;
+    return;
+  }
+
+  if (dev.GetCurrentFenceCounter() == m_copy_fence_counter)
+    dev.SubmitCommandBuffer(true, "download flush");
+  else
+    dev.WaitForFenceCounter(m_copy_fence_counter);
+
+  m_needs_flush = false;
+}
+
+void Deko3DDownloadTexture::SetDebugName(std::string_view name) {}
+PATCHEND
+mkdir -p 'src/util'
+# Add: src/util/deko3d_texture.h
+cat > 'src/util/deko3d_texture.h' <<'PATCHEND'
+// SPDX-FileCopyrightText: 2019-2022 Connor McLaughlin <stenzek@gmail.com>
+// SPDX-License-Identifier: (GPL-3.0 OR CC-BY-NC-ND-4.0)
+
+#pragma once
+#include "gpu_device.h"
+#include "gpu_texture.h"
+#include <tuple>
+
+#include <deko3d.hpp>
+
+#include "deko3d_memory_heap.h"
+
+class Deko3DDevice;
+class Deko3DStreamBuffer;
+
+bool Deko3DTextureFormatSupported(GPUTextureFormat fmt);
+
+class Deko3DTexture final : public GPUTexture
+{
+  friend Deko3DDevice;
+
+public:
+  ~Deko3DTexture();
+
+  void Destroy(bool defer);
+
+  bool Update(u32 x, u32 y, u32 width, u32 height, const void* data, u32 pitch, u32 layer = 0, u32 level = 0) override;
+  bool Map(void** map, u32* map_stride, u32 x, u32 y, u32 width, u32 height, u32 layer = 0, u32 level = 0) override;
+  void Unmap() override;
+
+  void SetDebugName(std::string_view name);
+  void GenerateMipmaps() override {}
+
+  static std::unique_ptr<Deko3DTexture> Create(u32 width, u32 height, u32 layers, u32 levels, u32 samples, Type type,
+                                               GPUTextureFormat format, uint32_t flags);
+
+  ALWAYS_INLINE const dk::Image& GetImage() const { return m_image; }
+  ALWAYS_INLINE const dk::ImageDescriptor& GetDescriptor() const { return m_descriptor; }
+
+  ALWAYS_INLINE u64 GetBarrierCounter() const { return m_barrier_counter; }
+  ALWAYS_INLINE void SetBarrierCounter(u64 counter) { m_barrier_counter = counter; }
+
+  ALWAYS_INLINE u64 GetDescriptorFence() const { return m_descriptor_fence; }
+  ALWAYS_INLINE void SetDescriptorFence(u64 counter) { m_descriptor_fence = counter; }
+
+  ALWAYS_INLINE u32 GetDescriptorIdx() const { return m_descriptor_idx; }
+  ALWAYS_INLINE void setDescriptorIdx(u32 idx) { m_descriptor_idx = idx; }
+
+  void MakeReadyForSampling() override;
+private:
+  Deko3DTexture(u32 width, u32 height, u32 layers, u32 levels, u32 samples, Type type, GPUTextureFormat format,
+                const dk::ImageLayout& layout, const Deko3DMemoryHeap::Allocation& memory);
+
+  dk::CmdBuf GetCommandBufferForUpdate();
+
+  void CopyTextureDataForUpload(void* dst, const void* src, u32 width, u32 height, u32 pitch, u32 upload_pitch) const;
+  Deko3DMemoryHeap::Allocation AllocateUploadStagingBuffer(const void* data, u32 pitch, u32 upload_pitch, u32 width,
+                                                           u32 height) const;
+  void UpdateFromBuffer(dk::CmdBuf cmdbuf, u32 x, u32 y, u32 width, u32 height, u32 layer, u32 level, u32 pitch,
+                        DkGpuAddr buffer);
+
+  // Contains the barrier counter from when the texture was last bound as render target
+  // So we can check whether there was a barrier
+  u64 m_barrier_counter = 0;
+
+  // Fence counter for which the descriptor index is valid
+  u64 m_descriptor_fence = std::numeric_limits<u64>::max();
+  u32 m_descriptor_idx;
+
+  u32 m_map_offset = 0;
+  u16 m_map_x = 0;
+  u16 m_map_y = 0;
+  u16 m_map_width = 0;
+  u16 m_map_height = 0;
+  u8 m_map_layer = 0;
+  u8 m_map_level = 0;
+
+  Deko3DMemoryHeap::Allocation m_memory;
+  dk::Image m_image;
+  dk::ImageDescriptor m_descriptor;
+};
+
+class Deko3DSampler final : public GPUSampler
+{
+  friend Deko3DDevice;
+
+public:
+  ~Deko3DSampler() override;
+
+  void SetDebugName(std::string_view name);
+
+  ALWAYS_INLINE u64 GetDescriptorFence() const { return m_descriptor_fence; }
+  ALWAYS_INLINE void SetDescriptorFence(u64 counter) { m_descriptor_fence = counter; }
+
+  ALWAYS_INLINE u32 GetDescriptorIdx() const { return m_descriptor_idx; }
+  ALWAYS_INLINE void setDescriptorIdx(u32 idx) { m_descriptor_idx = idx; }
+
+  const dk::SamplerDescriptor& GetDescriptor() const { return m_descriptor; }
+
+private:
+  Deko3DSampler(const dk::SamplerDescriptor& descriptor);
+
+  u64 m_descriptor_fence = std::numeric_limits<u64>::max();
+  u32 m_descriptor_idx;
+
+  dk::SamplerDescriptor m_descriptor;
+};
+
+class Deko3DTextureBuffer final : public GPUTextureBuffer
+{
+  friend Deko3DDevice;
+
+public:
+  ~Deko3DTextureBuffer() override;
+
+  ALWAYS_INLINE Deko3DStreamBuffer* GetBuffer() const { return m_buffer.get(); }
+  ALWAYS_INLINE const dk::Image& GetImage() const { return m_image; }
+
+  // Inherited via GPUTextureBuffer
+  void* Map(u32 required_elements) override;
+  void Unmap(u32 used_elements) override;
+
+  void SetDebugName(std::string_view name);
+
+  ALWAYS_INLINE u64 GetDescriptorFence() const { return m_descriptor_fence; }
+  ALWAYS_INLINE void SetDescriptorFence(u64 counter) { m_descriptor_fence = counter; }
+
+  ALWAYS_INLINE u32 GetDescriptorIdx() const { return m_descriptor_idx; }
+  ALWAYS_INLINE void setDescriptorIdx(u32 idx) { m_descriptor_idx = idx; }
+
+private:
+  Deko3DTextureBuffer(GPUTextureBuffer::Format format, u32 size_in_elements, std::unique_ptr<Deko3DStreamBuffer> buffer,
+                      const dk::ImageLayout& layout);
+
+  std::unique_ptr<Deko3DStreamBuffer> m_buffer;
+  dk::Image m_image;
+
+  // Fence counter for which the descriptor index is valid
+  u64 m_descriptor_fence = std::numeric_limits<u64>::max();
+  u32 m_descriptor_idx;
+};
+
+
+class Deko3DDownloadTexture final : public GPUDownloadTexture
+{
+public:
+  ~Deko3DDownloadTexture() override;
+
+  static std::unique_ptr<Deko3DDownloadTexture> Create(u32 width, u32 height, GPUTextureFormat format, void* memory,
+                                                       size_t memory_size, u32 memory_pitch);
+
+  void CopyFromTexture(u32 dst_x, u32 dst_y, GPUTexture* src, u32 src_x, u32 src_y, u32 width, u32 height,
+                       u32 src_layer, u32 src_level, bool use_transfer_pitch) override;
+
+  bool Map(u32 x, u32 y, u32 width, u32 height) override;
+  void Unmap() override;
+
+  void Flush() override;
+
+  void SetDebugName(std::string_view name);
+
+private:
+  Deko3DDownloadTexture(u32 width, u32 height, GPUTextureFormat format, bool is_imported, Deko3DMemoryHeap::Allocation buffer,
+                        const u8* map_ptr, u32 map_pitch);
+
+  Deko3DMemoryHeap::Allocation m_buffer;
+  u64 m_copy_fence_counter;
+};
+PATCHEND
 # Modify: src/util/dyn_shaderc.h
 ed -s 'src/util/dyn_shaderc.h' <<'PATCHEND'
 32a
@@ -14694,7 +20019,7 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
 #endif
 .
 1482a
-#if defined(__LIBRETRO__) && defined(__ANDROID__)
+#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__))
   // Nothing to do — statically linked.
 #else
 .
@@ -14703,7 +20028,7 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
 .
 1449a
 
-#if defined(__LIBRETRO__) && defined(__ANDROID__)
+#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__))
   // Android libretro builds link spirv-cross statically — assign function pointers directly.
   static bool s_spirv_cross_initialized = false;
   if (s_spirv_cross_initialized)
@@ -14726,7 +20051,7 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
   DYN_SHADERC_OPTIONAL_FUNCTIONS(UNLOAD_FUNC)
 .
 1427a
-#if defined(__LIBRETRO__) && defined(__ANDROID__)
+#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__))
   if (g_shaderc_compiler)
   {
     ::shaderc_compiler_release(g_shaderc_compiler);
@@ -14751,7 +20076,7 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
 .
 1393a
 
-#if defined(__LIBRETRO__) && defined(__ANDROID__)
+#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__))
   // Android libretro builds link shaderc statically — assign function pointers directly.
   if (g_shaderc_compiler)
     return true;
@@ -14799,6 +20124,13 @@ static const char* shaderc_compilation_status_to_string_fallback(shaderc_compila
 1383a
 DYN_SHADERC_OPTIONAL_FUNCTIONS(ADD_FUNC)
 .
+1363a
+#endif
+
+#ifdef __SWITCH__
+    case RenderAPI::Deko3D:
+      return std::make_unique<Deko3DDevice>();
+.
 1353d
 1352a
 #if defined(_WIN32) && !defined(__LIBRETRO__)
@@ -14810,6 +20142,12 @@ DYN_SHADERC_OPTIONAL_FUNCTIONS(ADD_FUNC)
 405d
 404a
 #if defined(_WIN32) && !defined(__LIBRETRO__)
+.
+46a
+#endif
+
+#ifdef __SWITCH__
+#include "deko3d_device.h"
 .
 32d
 31a
@@ -14825,6 +20163,42 @@ ed -s 'src/util/gpu_device.h' <<'PATCHEND'
 #include <unordered_map>
 .
 wq
+PATCHEND
+# Modify: src/util/gpu_types.h
+ed -s 'src/util/gpu_types.h' <<'PATCHEND'
+16d
+15a
+  Metal,
+  Deko3D
+.
+wq
+PATCHEND
+# Modify: src/util/http_cache.h
+ed -s 'src/util/http_cache.h' <<'PATCHEND'
+104a
+
+#endif // !__LIBRETRO__
+.
+4a
+
+#ifdef __LIBRETRO__
+#include "http_cache_libretro.h"
+#else
+.
+wq
+PATCHEND
+mkdir -p 'src/util'
+# Add: src/util/http_cache_libretro.h
+cat > 'src/util/http_cache_libretro.h' <<'PATCHEND'
+// Stub HTTPCache for libretro builds — no HTTP caching.
+#pragma once
+
+namespace HTTPCache {
+
+inline void Shutdown() {}
+inline void PollRequests() {}
+
+} // namespace HTTPCache
 PATCHEND
 # Modify: src/util/image.cpp
 ed -s 'src/util/image.cpp' <<'PATCHEND'
@@ -14844,9 +20218,11 @@ wq
 PATCHEND
 # Modify: src/util/imgui_manager.h
 ed -s 'src/util/imgui_manager.h' <<'PATCHEND'
-276a
+287a
 #endif // !__LIBRETRO__
 .
+264,265d
+38,46d
 4a
 
 #ifdef __LIBRETRO__
@@ -14912,6 +20288,7 @@ inline constexpr float DEFAULT_SCREEN_MARGIN = 10.0f;
 PATCHEND
 # Modify: src/util/input_manager.cpp
 ed -s 'src/util/input_manager.cpp' <<'PATCHEND'
+1591s/ || ImGuiManager::HasSoftwareCursor(0)//
 2660d
 2659a
 #if defined(_WIN32) && !defined(__LIBRETRO__)
@@ -14950,10 +20327,6 @@ ed -s 'src/util/input_manager.cpp' <<'PATCHEND'
 1626d
 1625a
 #if defined(_WIN32) && !defined(__LIBRETRO__)
-.
-1591d
-1590a
-  const bool hide_mouse_cursor = has_relative_mode_bindings;
 .
 1556,1558d
 1529,1530d
@@ -15016,10 +20389,7 @@ wq
 PATCHEND
 # Modify: src/util/media_capture.cpp
 ed -s 'src/util/media_capture.cpp' <<'PATCHEND'
-35d
-34a
-#include <mferror.h>
-.
+35s/M/m/
 wq
 PATCHEND
 # Modify: src/util/media_capture.h
@@ -15086,6 +20456,12 @@ PATCHEND
 # Modify: src/util/opengl_context.cpp
 ed -s 'src/util/opengl_context.cpp' <<'PATCHEND'
 76,77s/^  //
+149a
+#elif defined(__SWITCH__) && defined(__LIBRETRO__)
+  // Switch libretro gets its GL context from the frontend via SetExternalContext.
+  // No platform context creation needed.
+  context.reset();
+.
 148d
 147a
 #elif defined(__ANDROID__) && !defined(__LIBRETRO__)
@@ -15277,11 +20653,209 @@ static struct sigaction s_prev_sigbus_action;
 .
 240d
 239a
+#elif defined(__SWITCH__)
+
+#include <switch.h>
+
+// libnx kernel exception frame for AArch64. Layout is fixed by the kernel ABI;
+// see libnx <switch/arm/counter.h> / Atmosphère docs. Used to read pc/far/esr
+// from inside the page-fault handler.
+struct ExceptionFrameA64
+{
+  u64 x[9];
+  u64 lr, sp, pc;
+  u32 pstate, afsr0, afsr1, esr;
+  u64 far;
+};
+static_assert(sizeof(ExceptionFrameA64) == 0x78, "ExceptionFrameA64 size mismatch");
+
+namespace PageFaultHandler {
+static std::recursive_mutex s_exception_handler_mutex;
+static bool s_in_exception_handler = false;
+static bool s_installed = false;
+} // namespace PageFaultHandler
+
+// Exception stack referenced from the asm entry below. Plain C++ global so the
+// linker handles alignment/.bss placement instead of inline-asm directives.
+extern "C" {
+alignas(16) u8 switch_exception_stack_top[0x8000];
+}
+
+extern "C" void switch_exception_handler(Result reason, ExceptionFrameA64* frame, u64 fp)
+{
+  const u32 ec = (frame->esr >> 26) & 0x3F;
+  // Instruction aborts (0x20/0x21): jump to unmapped code, likely vtable/vfunc corruption.
+  // Data aborts (0x24/0x25): page faults we may be able to handle.
+  const bool is_insn_abort = (ec == 0x20 || ec == 0x21);
+  const bool is_data_abort = (ec == 0x24 || ec == 0x25);
+
+  if (!is_data_abort && !is_insn_abort)
+  {
+    return;
+  }
+
+  // Don't attempt to handle instruction aborts — code at PC is unmapped.
+  if (is_insn_abort)
+    goto backtrace_and_break;
+
+  {
+    std::unique_lock lock(PageFaultHandler::s_exception_handler_mutex);
+    if (PageFaultHandler::s_in_exception_handler)
+      goto unhandled;
+
+    PageFaultHandler::s_in_exception_handler = true;
+
+    void* const exception_pc = reinterpret_cast<void*>(frame->pc);
+    void* const exception_address = reinterpret_cast<void*>(frame->far);
+    const bool is_write = IsStoreInstruction(exception_pc);
+
+    const PageFaultHandler::HandlerResult handled =
+      PageFaultHandler::HandlePageFault(exception_pc, exception_address, is_write);
+
+    PageFaultHandler::s_in_exception_handler = false;
+
+    if (handled == PageFaultHandler::HandlerResult::ContinueExecution)
+      return;
+  }
+
+unhandled:
+
+backtrace_and_break:
+  {
+    char dbg[256];
+    int len = std::snprintf(dbg, sizeof(dbg),
+                            "[GS] Unhandled fault: PC=%p FAR=%p ESR=%08x EC=%02x LR=%p SP=%p\n",
+                            reinterpret_cast<void*>(frame->pc),
+                            reinterpret_cast<void*>(frame->far),
+                            frame->esr,
+                            ec,
+                            reinterpret_cast<void*>(frame->lr),
+                            reinterpret_cast<void*>(frame->sp));
+    svcOutputDebugString(dbg, len);
+
+    // Walk aarch64 frame pointer chain: [FP+0]=prev FP, [FP+8]=LR
+    u64 cur = fp;
+    int depth = 0;
+    while (cur && depth < 16 && (cur & 0xF) == 0) {
+      // Read two 64-bit words at cur: [prev_fp, lr]
+      u64 prev_fp = 0, lr = 0;
+      // Guard against unmapped FP: use a best-effort read.
+      // On instruction abort the FP chain may be partially valid.
+      __builtin_memcpy(&prev_fp, reinterpret_cast<const void*>(cur), 8);
+      __builtin_memcpy(&lr, reinterpret_cast<const void*>(cur + 8), 8);
+
+      len = std::snprintf(dbg, sizeof(dbg),
+                          "[GS] BT[%d] fp=%016lx lr=%016lx\n", depth, cur, lr);
+      svcOutputDebugString(dbg, len);
+
+      if (prev_fp == 0 || prev_fp <= cur)
+        break;
+      cur = prev_fp;
+      depth++;
+    }
+  }
+  svcBreak(BreakReason_Panic, 0, 0);
+}
+
+// Override libnx's weak __libnx_exception_entry. crt0 stores this symbol's
+// address in TLS at process init, so the override takes effect automatically.
+// Lives in this TU (rather than a standalone .S/.cpp) so it gets pulled into
+// the libretro static archive alongside PageFaultHandler::Install — which is
+// referenced externally and guarantees the object is linked in.
+//
+// Frame layout from kernel: x0..x8/lr/sp/pc/pstate/esr/far saved in
+// ExceptionFrameA64 at x1. We additionally save caller-saved x9-x18 and the
+// full 16 bytes of v0-v31 (the lower half of v8-v15 is callee-saved per AAPCS,
+// but a uniform 16x32 save is simpler than partial saves of upper halves).
+__asm__(
+    ".text\n"
+    ".global __libnx_exception_entry\n"
+    ".type __libnx_exception_entry, %function\n"
+    "__libnx_exception_entry:\n"
+    "    adrp x2, switch_exception_stack_top\n"
+    "    add x2, x2, #:lo12:switch_exception_stack_top\n"
+    "    add sp, x2, #0x8000\n"
+    "\n"
+    "    sub sp, sp, #16*37\n"
+    "\n"
+    "    stp x9, x10, [sp]\n"
+    "    stp x11, x12, [sp, #16*1]\n"
+    "    stp x13, x14, [sp, #16*2]\n"
+    "    stp x15, x16, [sp, #16*3]\n"
+    "    stp x17, x18, [sp, #16*4]\n"
+    "\n"
+    "    stp q0, q1, [sp, #16*5]\n"
+    "    stp q2, q3, [sp, #16*7]\n"
+    "    stp q4, q5, [sp, #16*9]\n"
+    "    stp q6, q7, [sp, #16*11]\n"
+    "    stp q8, q9, [sp, #16*13]\n"
+    "    stp q10, q11, [sp, #16*15]\n"
+    "    stp q12, q13, [sp, #16*17]\n"
+    "    stp q14, q15, [sp, #16*19]\n"
+    "    stp q16, q17, [sp, #16*21]\n"
+    "    stp q18, q19, [sp, #16*23]\n"
+    "    stp q20, q21, [sp, #16*25]\n"
+    "    stp q22, q23, [sp, #16*27]\n"
+    "    stp q24, q25, [sp, #16*29]\n"
+    "    stp q26, q27, [sp, #16*31]\n"
+    "    stp q28, q29, [sp, #16*33]\n"
+    "    stp q30, q31, [sp, #16*35]\n"
+    "\n"
+    // x0 = exception reason, x1 = exception frame (set by kernel)
+    "    mov x2, x29\n"
+    "    bl switch_exception_handler\n"
+    "\n"
+    "    ldp q0, q1, [sp, #16*5]\n"
+    "    ldp q2, q3, [sp, #16*7]\n"
+    "    ldp q4, q5, [sp, #16*9]\n"
+    "    ldp q6, q7, [sp, #16*11]\n"
+    "    ldp q8, q9, [sp, #16*13]\n"
+    "    ldp q10, q11, [sp, #16*15]\n"
+    "    ldp q12, q13, [sp, #16*17]\n"
+    "    ldp q14, q15, [sp, #16*19]\n"
+    "    ldp q16, q17, [sp, #16*21]\n"
+    "    ldp q18, q19, [sp, #16*23]\n"
+    "    ldp q20, q21, [sp, #16*25]\n"
+    "    ldp q22, q23, [sp, #16*27]\n"
+    "    ldp q24, q25, [sp, #16*29]\n"
+    "    ldp q26, q27, [sp, #16*31]\n"
+    "    ldp q28, q29, [sp, #16*33]\n"
+    "    ldp q30, q31, [sp, #16*35]\n"
+    "\n"
+    "    ldp x9, x10, [sp]\n"
+    "    ldp x11, x12, [sp, #16*1]\n"
+    "    ldp x13, x14, [sp, #16*2]\n"
+    "    ldp x15, x16, [sp, #16*3]\n"
+    "    ldp x17, x18, [sp, #16*4]\n"
+    "\n"
+    // Tail-call: svcReturnFromException(0) does not return. Use b (not bl) —
+    // the kernel restores the frame; preserving lr is pointless and would
+    // clobber what we just restored.
+    "    mov x0, 0\n"
+    "    b svcReturnFromException\n"
+);
+
+bool PageFaultHandler::Install(Error* error)
+{
+  // No runtime registration: __libnx_exception_entry is wired by libnx crt0
+  // via the static-init TLS slot. The strong symbol above wins over libnx's
+  // weak default at link time.
+  s_installed = true;
+  return true;
+}
+
 #elif (!defined(__ANDROID__) || defined(__LIBRETRO__))
 .
 18d
 17a
 #elif defined(__linux__) && (!defined(__ANDROID__) || defined(__LIBRETRO__))
+.
+wq
+PATCHEND
+# Modify: src/util/page_fault_handler.h
+ed -s 'src/util/page_fault_handler.h' <<'PATCHEND'
+17a
+
 .
 wq
 PATCHEND
@@ -15328,7 +20902,7 @@ public:
   bool NeedsDepthBuffer() const { return false; }
   bool CheckTargets(u32, u32, u8, u32, u32, u32, u32) { return false; }
   GPUTexture* GetOutputTexture() { return nullptr; }
-  void Apply(GPUTexture*, GPUTexture*, GPUTexture*, const struct GSVector4i&, u32, u32, u32, u32) {}
+  void Apply(GPUTexture*, GPUTexture*, GPUTexture*, const class GSVector4i&, u32, u32, u32, u32) {}
   void LoadStages(auto&, const SettingsInterface&, bool) {}
   void UpdateSettings(auto&, const SettingsInterface&) {}
 };
@@ -15372,6 +20946,46 @@ SHADERC_EXPORT shaderc_compilation_result_t shaderc_optimize_spv(
 #ifdef __cplusplus
 }
 #endif
+PATCHEND
+# Modify: src/util/shadergen.cpp
+ed -s 'src/util/shadergen.cpp' <<'PATCHEND'
+880d
+879a
+  ss << "  #if API_OPENGL || API_OPENGL_ES || API_VULKAN || API_DEKO3D\n";
+.
+242a
+  DefineMacro(ss, "API_DEKO3D", m_render_api == RenderAPI::Deko3D);
+.
+177a
+#ifdef __SWITCH__
+  if (m_render_api == RenderAPI::Deko3D)
+    ss << "#version 460\n\n"; // RSDuck-tested; UAM mesa frontend rejects "450 core" suffix
+  else
+#endif
+.
+78a
+
+#ifdef __SWITCH__
+    case RenderAPI::Deko3D:
+      // UAM is mesa's OpenGL GLSL frontend — Vulkan-style GLSL (push_constant,
+      // set=N, gl_VertexIndex) is not supported. Use plain GLSL; ctor below
+      // still forces interface blocks + binding layout for the Switch path.
+      return GPUShaderLanguage::GLSL;
+#endif
+.
+41a
+#ifdef __SWITCH__
+      // Deko3D uses UAM (mesa OpenGL GLSL frontend); we emit plain GLSL
+      // (m_spirv=false) but still need explicit interface blocks + binding
+      // qualifiers (UAM supports ARB_explicit_uniform_location + 420pack).
+      if (m_render_api == RenderAPI::Deko3D)
+      {
+        m_use_glsl_interface_blocks = true;
+        m_use_glsl_binding_layout = true;
+      }
+#endif
+.
+wq
 PATCHEND
 # Modify: src/util/vulkan_device.cpp
 ed -s 'src/util/vulkan_device.cpp' <<'PATCHEND'
@@ -15652,9 +21266,6 @@ wq
 PATCHEND
 # Modify: src/util/xinput_source.h
 ed -s 'src/util/xinput_source.h' <<'PATCHEND'
-7d
-6a
-#include <xinput.h>
-.
+7s/X/x/
 wq
 PATCHEND
