@@ -16010,7 +16010,7 @@ RETRO_API void retro_get_system_info(struct retro_system_info* info)
 {
   std::memset(info, 0, sizeof(*info));
   info->library_name = "GooseStation";
-  info->library_version = "0.1 (" __DATE__ " " __TIME__ ")";
+  info->library_version = "0.3 (" __DATE__ " " __TIME__ ")";
   info->valid_extensions = "cue|bin|img|mdf|chd|pbp|iso|m3u|exe|psf|psxexe";
   info->need_fullpath = true;
   info->block_extract = true;
