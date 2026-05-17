@@ -4,8 +4,8 @@
 ###   docker build -f Dockerfile.android -t goosestation-builder-android .
 ###   docker run --rm -v "$PWD/dist:/work/dist:Z" goosestation-builder-android android
 ###
-### NDK and cross-compiled deps are baked into the image. No .cache/ mount needed;
-### only dist/ is mounted for output. Rebuild image when deps or upstream commit change.
+### NDK and cross-compiled deps are baked into the image.
+### Only dist/ is mounted for output. Rebuild image when deps or upstream commit change.
 ###
 ### Layer ordering (least → most frequent changes):
 ###   1. apt packages
@@ -20,7 +20,7 @@ FROM debian:trixie-slim@sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13
 ARG TARGETARCH
 ARG ANDROID_NDK_VERSION=r29
 ARG ANDROID_ABI=arm64-v8a
-ARG UPSTREAM_COMMIT=54feef27dab1b105c30ad341e503c399ebb2409d
+ARG UPSTREAM_COMMIT=3a10c16b10d3dd23155ccd83a3af97c421d3cab1
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV ANDROID_NDK=/opt/android-ndk-${ANDROID_NDK_VERSION}
@@ -76,18 +76,16 @@ RUN NDK=${ANDROID_NDK} ANDROID_ABI=${ANDROID_ABI} BUILD_DIR=${ANDROID_BUILD_DIR}
     && touch ${ANDROID_DEPS_DIR}/.deps-ready \
     && rm /tmp/build-android-deps.sh
 
-# --- Layer 4: upstream source fetch + goosify ---
-COPY goosify.sh /tmp/goosify.sh
-RUN mkdir -p /work/.cache /work/src \
+# --- Layer 4: upstream source fetch + extract ---
+RUN mkdir -p /work/src \
     && curl -fsSL "https://github.com/stenzek/duckstation/archive/${UPSTREAM_COMMIT}.tar.gz" \
-        -o /work/.cache/duckstation-${UPSTREAM_COMMIT}.tar.gz \
-    && tar -xzf /work/.cache/duckstation-${UPSTREAM_COMMIT}.tar.gz -C /work/src \
-    && cp /tmp/goosify.sh /work/src/duckstation-${UPSTREAM_COMMIT}/goosify.sh \
-    && cd /work/src/duckstation-${UPSTREAM_COMMIT} && bash goosify.sh \
-    && touch .goosified \
-    && rm /tmp/goosify.sh
+        | tar -xzf - -C /work/src
 
-# --- Layer 5: project files ---
+# --- Layer 5: goosify (separated so goosify.sh edits don't re-fetch upstream) ---
+COPY goosify.sh /work/src/duckstation-${UPSTREAM_COMMIT}/goosify.sh
+RUN cd /work/src/duckstation-${UPSTREAM_COMMIT} && bash goosify.sh && touch .goosified
+
+# --- Layer 6: project files ---
 WORKDIR /work
 COPY . /work
 

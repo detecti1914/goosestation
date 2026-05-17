@@ -1,7 +1,7 @@
 # GooseStation libretro core builder.
 #
 
-UPSTREAM_COMMIT := 54feef27dab1b105c30ad341e503c399ebb2409d
+UPSTREAM_COMMIT := 3a10c16b10d3dd23155ccd83a3af97c421d3cab1
 
 UPSTREAM_URL := https://github.com/stenzek/duckstation/archive/$(UPSTREAM_COMMIT).tar.gz
 
@@ -78,7 +78,7 @@ $(TARBALL):
 	@echo "==> Fetching upstream $(UPSTREAM_COMMIT)..."
 	@curl -fsSL $(UPSTREAM_URL) -o $@.tmp && mv $@.tmp $@
 
-$(SRC_DIR)/.goosified: $(GOOSIFY) $(TARBALL)
+$(SRC_DIR)/.goosified: $(GOOSIFY)
 	@rm -rf $(SRC_DIR)
 	@mkdir -p $(SRC_ROOT)
 	@echo "==> Extracting upstream from cached tarball..."

@@ -58,18 +58,16 @@ RUN BUILD_DIR=${LINUX_BUILD_DIR} bash /tmp/build-linux-deps.sh \
     && touch ${LINUX_DEPS_DIR}/.deps-ready \
     && rm /tmp/build-linux-deps.sh
 
-# --- Layer 3: upstream source fetch + goosify ---
-COPY goosify.sh /tmp/goosify.sh
-RUN mkdir -p /work/.cache /work/src \
+# --- Layer 3: upstream source fetch + extract ---
+RUN mkdir -p /work/src \
     && curl -fsSL "https://github.com/stenzek/duckstation/archive/${UPSTREAM_COMMIT}.tar.gz" \
-        -o /work/.cache/duckstation-${UPSTREAM_COMMIT}.tar.gz \
-    && tar -xzf /work/.cache/duckstation-${UPSTREAM_COMMIT}.tar.gz -C /work/src \
-    && cp /tmp/goosify.sh /work/src/duckstation-${UPSTREAM_COMMIT}/goosify.sh \
-    && cd /work/src/duckstation-${UPSTREAM_COMMIT} && bash goosify.sh \
-    && touch .goosified \
-    && rm /tmp/goosify.sh
+        | tar -xzf - -C /work/src
 
-# --- Layer 4: project files ---
+# --- Layer 4: goosify (separated so goosify.sh edits don't re-fetch upstream) ---
+COPY goosify.sh /work/src/duckstation-${UPSTREAM_COMMIT}/goosify.sh
+RUN cd /work/src/duckstation-${UPSTREAM_COMMIT} && bash goosify.sh && touch .goosified
+
+# --- Layer 5: project files ---
 WORKDIR /work
 COPY . /work
 

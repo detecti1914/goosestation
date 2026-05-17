@@ -14,7 +14,7 @@
 # syntax=docker/dockerfile:1.6
 FROM devkitpro/devkita64:20260219@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282
 
-ARG UPSTREAM_COMMIT=54feef27dab1b105c30ad341e503c399ebb2409d
+ARG UPSTREAM_COMMIT=3a10c16b10d3dd23155ccd83a3af97c421d3cab1
 ARG RETROARCH_COMMIT=a340c70468
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -105,16 +105,14 @@ RUN mkdir -p /opt/shader-headers \
     && cp -r /usr/include/shaderc /opt/shader-headers/ \
     && cp -r /usr/include/spirv_cross /opt/shader-headers/
 
-# --- Upstream source fetch + goosify ---
-COPY goosify.sh /tmp/goosify.sh
-RUN mkdir -p /work/.cache /work/src \
+# --- Upstream source fetch + extract ---
+RUN mkdir -p /work/src \
     && curl -fsSL "https://github.com/stenzek/duckstation/archive/${UPSTREAM_COMMIT}.tar.gz" \
-        -o /work/.cache/duckstation-${UPSTREAM_COMMIT}.tar.gz \
-    && tar -xzf /work/.cache/duckstation-${UPSTREAM_COMMIT}.tar.gz -C /work/src \
-    && cp /tmp/goosify.sh /work/src/duckstation-${UPSTREAM_COMMIT}/goosify.sh \
-    && cd /work/src/duckstation-${UPSTREAM_COMMIT} && bash goosify.sh \
-    && touch .goosified \
-    && rm /tmp/goosify.sh
+        | tar -xzf - -C /work/src
+
+# --- Goosify (separated so goosify.sh edits don't re-fetch upstream) ---
+COPY goosify.sh /work/src/duckstation-${UPSTREAM_COMMIT}/goosify.sh
+RUN cd /work/src/duckstation-${UPSTREAM_COMMIT} && bash goosify.sh && touch .goosified
 
 # --- RetroArch (clone + patches) ---
 COPY patches/retroarch/ /tmp/retroarch-patches/

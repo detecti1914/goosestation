@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-UPSTREAM_COMMIT="54feef27dab1b105c30ad341e503c399ebb2409d"
+UPSTREAM_COMMIT="3a10c16b10d3dd23155ccd83a3af97c421d3cab1"
 UPSTREAM_URL="https://github.com/stenzek/duckstation/archive/${UPSTREAM_COMMIT}.tar.gz"
 
 CACHE_DIR="${SCRIPT_DIR}/.cache"

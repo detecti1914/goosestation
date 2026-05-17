@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Patch: 54feef27dab1b105c30ad341e503c399ebb2409d → WORKING
+# Patch: 3a10c16b10d3dd23155ccd83a3af97c421d3cab1 → WORKING
 # M = smart ed (indent→s, del→d, add→a), A = copy file, D = rm
 set -e
 echo 'GOOSIFYING...'
@@ -884,15 +884,15 @@ PATCHEND
 # Modify: src/common/memmap.cpp
 ed -s 'src/common/memmap.cpp' <<'PATCHEND'
 18s/P/p/
-744a
+713a
 #endif
 .
-743a
+712a
 #if !defined(__ANDROID__)
 .
-718,719d
-692d
-691a
+687,688d
+661d
+660a
 #if defined(__ANDROID__) && defined(__LIBRETRO__)
   // Android libretro: use memfd_create via syscall (shm_open not available in Bionic)
   const int fd = android_memfd_create(is_anonymous ? "" : name, 0);
@@ -903,8 +903,8 @@ ed -s 'src/common/memmap.cpp' <<'PATCHEND'
   }
 #elif defined(__linux__) || defined(__FreeBSD__)
 .
-687d
-686a
+656d
+655a
 #if !defined(__ANDROID__) || defined(__LIBRETRO__)
 
 #if defined(__ANDROID__) && defined(__LIBRETRO__)
@@ -915,7 +915,26 @@ static int android_memfd_create(const char* name, unsigned int flags)
 }
 #endif
 .
-648a
+617a
+#ifdef __aarch64__
+
+static thread_local int s_code_write_depth = 0;
+
+void MemMap::BeginCodeWrite()
+{
+  if ((s_code_write_depth++) == 0)
+    pthread_jit_write_protect_np(0);
+}
+
+void MemMap::EndCodeWrite()
+{
+  DebugAssert(s_code_write_depth > 0);
+  if ((--s_code_write_depth) == 0)
+    pthread_jit_write_protect_np(1);
+}
+
+#endif
+
 #elif defined(__SWITCH__)
 
 u32 MemMap::GetRuntimePageSize()
@@ -1342,17 +1361,17 @@ bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size)
 }
 
 .
-142a
+139a
   }
 .
-140,141d
-139a
+137,138d
+136a
   HMODULE mod = nullptr;
   if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                           reinterpret_cast<LPCWSTR>(&GetBaseAddress), &mod))
   {
 .
-30a
+27a
 #elif defined(__SWITCH__)
 #include <cerrno>
 #include <cstdlib>
@@ -1390,10 +1409,17 @@ wq
 PATCHEND
 # Modify: src/common/memmap.h
 ed -s 'src/common/memmap.h' <<'PATCHEND'
-84,85d
 83a
 /// JIT write protect for Apple Silicon / Switch. Needs to be called prior to writing to any RWX pages.
 #if (!defined(__APPLE__) || !defined(__aarch64__)) && !defined(__SWITCH__)
+// clang-format off
+ALWAYS_INLINE static void BeginCodeWrite() { }
+ALWAYS_INLINE static void EndCodeWrite() { }
+// clang-format on
+#else
+void BeginCodeWrite();
+void EndCodeWrite();
+#endif
 .
 73a
 #if defined(__SWITCH__)
@@ -1484,37 +1510,37 @@ wq
 PATCHEND
 # Modify: src/core/CMakeLists.txt
 ed -s 'src/core/CMakeLists.txt' <<'PATCHEND'
-154s/^/  /
-180s/^/  /
-209,221d
-180a
+157s/^/  /
+183s/^/  /
+212,224d
+183a
   else()
     target_compile_definitions(core PUBLIC "ENABLE_RECOMPILER=1" "ENABLE_MMAP_FASTMEM=1")
   endif()
 .
-179a
+182a
   if(SWITCH)
 .
-154a
+157a
 endif()
 .
-153a
+156a
 if(BUILD_LIBRETRO)
   target_sources(core PRIVATE hotkeys_stub.cpp)
   target_link_libraries(core PRIVATE xxhash rapidyaml cpuinfo::cpuinfo speex_resampler_headers)
 else()
   target_sources(core PRIVATE hotkeys.cpp)
 .
-152a
+155a
 target_include_directories(core PRIVATE "${PROJECT_SOURCE_DIR}/dep/imgui/include")
 .
-125,126d
-117,118d
-109,110d
-98,99d
-84,85d
-82d
-43,56d
+127,128d
+119,120d
+111,112d
+100,101d
+86,87d
+84d
+45,58d
 2,4d
 wq
 PATCHEND
@@ -1684,11 +1710,11 @@ PATCHEND
 # Modify: src/core/cdrom.cpp
 ed -s 'src/core/cdrom.cpp' <<'PATCHEND'
 1032s/FullscreenUI::LoadingScreen//
-4361a
+4360a
 
 #endif
 .
-4093a
+4092a
 #ifdef __LIBRETRO__
   return;
 #else
@@ -1729,85 +1755,65 @@ wq
 PATCHEND
 # Modify: src/core/core.cpp
 ed -s 'src/core/core.cpp' <<'PATCHEND'
-525d
-524a
-#if defined(__ANDROID__) && !defined(__LIBRETRO__)
-.
-311a
+337a
 #endif
 .
-310a
+336a
 #ifndef __LIBRETRO__
 .
-223d
-222a
+249d
+248a
 #if !defined(__ANDROID__) || defined(__LIBRETRO__)
 .
-105d
-104a
+131d
+130a
 #if !defined(__ANDROID__) || defined(__LIBRETRO__)
 .
 46d
 45a
-#if !defined(__ANDROID__) || defined(__LIBRETRO__)
-.
-29d
-28a
 #include <shlobj.h>
-.
-wq
-PATCHEND
-# Modify: src/core/core_private.h
-ed -s 'src/core/core_private.h' <<'PATCHEND'
-48d
-47a
-#if !defined(__ANDROID__) || defined(__LIBRETRO__)
-.
-15d
-14a
-#if !defined(__ANDROID__) || defined(__LIBRETRO__)
 .
 wq
 PATCHEND
 # Modify: src/core/cpu_code_cache.cpp
 ed -s 'src/core/cpu_code_cache.cpp' <<'PATCHEND'
-1722d
-1721a
+1823d
+1822a
   // Track the faulting guest PC so future compilations skip fastmem for this
   // site. The backpatched instruction (now a jump to the slow-path thunk) stays
   // in place — no block invalidation needed. The block keeps running.
 .
-1706,1719d
-1691a
+1807,1820d
+1792a
   }
 .
-1690a
+1791a
   {
     WARNING_LOG("HandleFastmemException: no backpatch info for PC={} (fault={})", exception_pc, fault_address);
 .
-1688a
+1789a
   // Backpatch keys are RX/logical addresses on all platforms. On Switch with
   // dual-mapped JIT, vixl's CodeBuffer is reset with the RX address so cursor
   // queries (which become AddLoadStoreInfo's key) match the kernel-reported
   // exception_pc — no translation needed at lookup time.
 .
-1445d
-1444a
-      std::memset(MemMap::GetJITWritePointer(s_far_code_ptr), 0, s_far_code_used);
+1529d
+1528a
+      std::memset(MemMap::GetJITWritePointer(s_locals.far_code_ptr), 0, s_locals.far_code_used);
 .
-1439d
-1438a
-      std::memset(MemMap::GetJITWritePointer(s_code_ptr), 0, s_code_used);
+1523d
+1522a
+      std::memset(MemMap::GetJITWritePointer(s_locals.code_ptr), 0, s_locals.code_used);
 .
-1342a
+1428a
   // Flush dcache/icache for the new code range before linking it into the LUT.
   // Required now that EndCodeWrite no longer does a global jitTransition* flush.
   MemMap::FlushInstructionCache(const_cast<void*>(block->host_code), block->host_code_size);
 .
-615a
+688a
 #endif
 .
-613a
+686a
 #ifdef __SWITCH__
   // AliasCode mirrors on Switch only support R+W or R+X — there is no cheap
   // RO state. WriteProtect SMC would need to unmap+remap the mirror per
@@ -1815,11 +1821,10 @@ ed -s 'src/core/cpu_code_cache.cpp' <<'PATCHEND'
   return PageProtectionMode::ManualCheck;
 #else
 .
-123d
-122a
+62d
+61a
 static constexpr u32 RECOMPILER_FAR_CODE_CACHE_SIZE = 8 * 1024 * 1024;
 #elif defined(__SWITCH__)
-// AArch64: no range limit like ARM32. RSDuck uses 32+16MB for Switch.
 static constexpr u32 RECOMPILER_CODE_CACHE_SIZE = 32 * 1024 * 1024;
 static constexpr u32 RECOMPILER_FAR_CODE_CACHE_SIZE = 16 * 1024 * 1024;
 .
@@ -1846,32 +1851,32 @@ wq
 PATCHEND
 # Modify: src/core/cpu_recompiler_arm64.cpp
 ed -s 'src/core/cpu_recompiler_arm64.cpp' <<'PATCHEND'
-1824s/const //2
-2690d
-2689a
+1825s/const //2
+2691d
+2690a
   Assembler arm_asm;
   arm_asm.GetBuffer()->Reset(static_cast<u8*>(MemMap::GetJITWritePointer(thunk_code)), static_cast<u8*>(thunk_code),
                              thunk_space);
 .
-2286,2288d
-2285a
+2287,2289d
+2286a
   const std::optional<Register> addr_reg =
     g_settings.gpu_pgxp_enable ? std::optional<Register>(WRegister(AllocateTempHostReg(HR_CALLEE_SAVED))) :
                                  std::optional<Register>();
 .
-2199,2201d
-2198a
+2200,2202d
+2199a
   const std::optional<Register> addr_reg =
     g_settings.gpu_pgxp_enable ? std::optional<Register>(WRegister(AllocateTempHostReg(HR_CALLEE_SAVED))) :
                                  std::optional<Register>();
 .
-2072,2074d
-2071a
+2073,2075d
+2072a
   const std::optional<Register> addr_reg =
     g_settings.gpu_pgxp_enable ? std::optional<Register>(WRegister(AllocateTempHostReg(HR_CALLEE_SAVED))) :
                                  std::optional<Register>();
 .
-2011a
+2012a
 
     if (g_settings.cpu_fastmem_mode == CPUFastmemMode::LUT)
     {
@@ -1905,14 +1910,14 @@ ed -s 'src/core/cpu_recompiler_arm64.cpp' <<'PATCHEND'
     }
 
 .
-1991a
+1992a
       armAsm->cbz(RXARG3, &slow_path);
 .
-1986a
+1987a
     Label slow_path, done;
 
 .
-1900a
+1901a
 
     if (g_settings.cpu_fastmem_mode == CPUFastmemMode::LUT)
     {
@@ -1947,21 +1952,21 @@ ed -s 'src/core/cpu_recompiler_arm64.cpp' <<'PATCHEND'
     }
 
 .
-1879a
+1880a
       armAsm->cbz(RXARG3, &slow_path);
 .
-1873a
+1874a
     Label slow_path, done;
 .
-566,567d
-565a
+567,568d
+566a
   m_emitter.GetBuffer()->Reset(static_cast<u8*>(MemMap::GetJITWritePointer(code_buffer)), code_buffer,
                                code_buffer_space);
   m_far_emitter.GetBuffer()->Reset(static_cast<u8*>(MemMap::GetJITWritePointer(far_code_buffer)), far_code_buffer,
                                    far_code_space);
 .
-545d
-544a
+546d
+545a
   std::memset(MemMap::GetJITWritePointer(dst), padding_value, size);
 .
 448d
@@ -1983,6 +1988,14 @@ PATCHEND
 # Modify: src/core/cpu_recompiler_arm64.h
 ed -s 'src/core/cpu_recompiler_arm64.h' <<'PATCHEND'
 102s/const //2
+wq
+PATCHEND
+# Modify: src/core/discord_presence.h
+ed -s 'src/core/discord_presence.h' <<'PATCHEND'
+10,11d
+9a
+#if !defined(__ANDROID__) && !defined(__LIBRETRO__)
+.
 wq
 PATCHEND
 # Modify: src/core/dma.cpp
@@ -2007,7 +2020,7 @@ wq
 PATCHEND
 # Modify: src/core/fullscreenui.h
 ed -s 'src/core/fullscreenui.h' <<'PATCHEND'
-118a
+119a
 #endif // !__LIBRETRO__
 .
 4a
@@ -2161,15 +2174,15 @@ inline const Entry* GetEntryForGameDetails(const std::string&, u64) { return nul
 PATCHEND
 # Modify: src/core/game_list.h
 ed -s 'src/core/game_list.h' <<'PATCHEND'
-200a
+199a
 #endif // !__LIBRETRO__
 .
-187a
+186a
 std::string GetAchievementGameBadgePath(u32 game_id);
 void UpdateAchievementBadgeName(u32 game_id, std::string_view badge_name);
 .
-182d
-181a
+181d
+180a
 void UpdateAchievementData(const std::span<u8, 16> hash, u32 game_id, u32 num_achievements, u32 num_unlocked,
 .
 4a
@@ -2244,14 +2257,15 @@ inline void OnGameListEntriesChanged(std::span<const u32> changed_indices) {}
 PATCHEND
 # Modify: src/core/gdb_server.h
 ed -s 'src/core/gdb_server.h' <<'PATCHEND'
-14a
+27a
 #endif // !__LIBRETRO__
 .
-4a
-
+8d
+5a
 #ifdef __LIBRETRO__
 #include "gdb_server_libretro.h"
 #else
+
 .
 wq
 PATCHEND
@@ -2272,11 +2286,11 @@ inline void OnSystemResumed() {}
 PATCHEND
 # Modify: src/core/gpu.cpp
 ed -s 'src/core/gpu.cpp' <<'PATCHEND'
-2241a
+2239a
 
 #endif
 .
-2189a
+2187a
 #ifdef __LIBRETRO__
   return;
 #else
@@ -2344,72 +2358,72 @@ wq
 PATCHEND
 # Modify: src/core/gpu_hw.cpp
 ed -s 'src/core/gpu_hw.cpp' <<'PATCHEND'
-4443a
+4454a
 #endif
 .
-4420a
+4431a
 #ifndef __LIBRETRO__
 .
-4417a
+4428a
 #endif
 .
-4404a
+4415a
 #ifndef __LIBRETRO__
 .
-4208a
+4219a
   }
 .
-4207a
+4218a
   {
 .
-4197a
+4208a
       }
 .
-4196a
+4207a
       {
 .
-4191a
+4202a
         }
 .
-4190a
+4201a
         {
 .
-4184a
+4195a
 #endif
 .
-4170a
+4181a
 #ifndef __LIBRETRO__
 .
-4161d
-4155a
+4172d
+4166a
 #endif
 
 .
-4153a
+4164a
 #ifdef __LIBRETRO__
     const ExtractUniforms uniforms = {reinterpret_start_x, scaled_vram_offset_y, skip_x,
                                       static_cast<u32>(line_skip ? 2 : 1)};
 #else
 .
-4152a
+4163a
 #endif
 .
-4150a
+4161a
 #ifdef __LIBRETRO__
       u32 skip_x;
       u32 line_skip;
 #else
 .
-4138d
-4115a
+4149d
+4126a
 #endif
 .
-4111a
+4122a
 #ifdef __LIBRETRO__
     GPUTexture* depth_source = nullptr;
 #else
 .
-4081a
+4092a
 #if defined(__LIBRETRO__) && !defined(__APPLE__)
     // On Linux, UpdateVRAMReadTexture is needed to resolve dirty regions before display.
     // On macOS/MoltenVK, this copy causes a stale read: the CopyTextureRegion barrier doesn't
@@ -2422,51 +2436,51 @@ ed -s 'src/core/gpu_hw.cpp' <<'PATCHEND'
 #endif
 
 .
-4080a
+4091a
 #endif
 .
-4079a
+4090a
 #ifdef __LIBRETRO__
            true)
 #else
 .
-4074d
-4068d
-4067a
+4085d
+4079d
+4078a
     VideoPresenter::SetDisplayDisabled();
 .
-3962a
+3973a
 #ifdef __LIBRETRO__
   SetVRAMRenderTarget();
   g_gpu_device->SetViewport(m_vram_texture->GetRect());
 #endif
 
 .
-3668a
+3679a
 
 #ifdef __LIBRETRO__
       SetVRAMRenderTarget();
     g_gpu_device->SetViewport(m_vram_texture->GetRect());
 #endif
 .
-3543a
+3554a
 #ifdef __LIBRETRO__
   SetVRAMRenderTarget();
   g_gpu_device->SetViewport(m_vram_texture->GetRect());
 #endif
 
 .
-3388a
+3399a
 #ifdef __LIBRETRO__
   SetVRAMRenderTarget();
   g_gpu_device->SetViewport(m_vram_texture->GetRect());
 #endif
 
 .
-2182a
+2193a
 #endif
 .
-2177a
+2188a
 #ifdef __LIBRETRO__
   if (texture_mode != static_cast<u8>(BatchTextureMode::Disabled))
   {
@@ -2475,10 +2489,10 @@ ed -s 'src/core/gpu_hw.cpp' <<'PATCHEND'
   }
 #else
 .
-2074a
+2085a
 #endif
 .
-2073a
+2084a
 #ifdef __LIBRETRO__
     if (false)
 #else
@@ -2514,16 +2528,16 @@ wq
 PATCHEND
 # Modify: src/core/gpu_hw.h
 ed -s 'src/core/gpu_hw.h' <<'PATCHEND'
-371a
+373a
 #endif
 .
-370a
+372a
 #ifndef __LIBRETRO__
 .
-269a
+271a
 #endif
 .
-268a
+270a
 #ifndef __LIBRETRO__
 .
 20a
@@ -2536,12 +2550,12 @@ wq
 PATCHEND
 # Modify: src/core/gpu_hw_shadergen.cpp
 ed -s 'src/core/gpu_hw_shadergen.cpp' <<'PATCHEND'
-3164d
-3163a
+3148d
+3147a
   #if API_OPENGL || API_OPENGL_ES || API_VULKAN || API_DEKO3D
 .
-2713,2715d
-2712a
+2697,2699d
+2696a
 )";
 #ifdef __LIBRETRO__
   ss << "  uint2 icoords = uint2(uint(v_pos.x) + u_skip_x, uint(v_pos.y) * u_line_skip);\n";
@@ -2551,17 +2565,13 @@ ed -s 'src/core/gpu_hw_shadergen.cpp' <<'PATCHEND'
 #endif
   ss << R"(  int2 wrapped_coords = int2((icoords + u_vram_offset) % VRAM_SIZE);
 .
-2655a
+2639a
 #endif
 .
-2654a
+2638a
 #ifdef __LIBRETRO__
   DeclareUniformBuffer(ss, {"uint2 u_vram_offset", "uint u_skip_x", "uint u_line_skip"}, true);
 #else
-.
-1193d
-1192a
-#if API_OPENGL || API_OPENGL_ES || API_VULKAN || API_DEKO3D
 .
 155d
 154a
@@ -2652,10 +2662,10 @@ wq
 PATCHEND
 # Modify: src/core/host.h
 ed -s 'src/core/host.h' <<'PATCHEND'
-65a
+71a
 #endif
 .
-48a
+54a
 #ifdef __LIBRETRO__
 inline void OpenURL(std::string_view) {}
 inline std::string GetClipboardText() { return {}; }
@@ -2665,7 +2675,7 @@ inline const char* GetLanguageName(std::string_view) { return ""; }
 inline bool ChangeLanguage(const char*) { return false; }
 #else
 .
-16a
+22a
 
 inline void AddOSDMessage(OSDMessageType, std::string) {}
 inline void AddKeyedOSDMessage(OSDMessageType, std::string, std::string) {}
@@ -2675,7 +2685,7 @@ inline void AddIconOSDMessage(OSDMessageType, std::string, std::string, std::str
 inline void RemoveKeyedOSDMessage(std::string) {}
 inline void ClearOSDMessages() {}
 .
-15a
+21a
 enum class OSDMessageType : u8
 {
   Error,
@@ -2769,11 +2779,11 @@ inline void SaveCurrentSlot() {}
 PATCHEND
 # Modify: src/core/mdec.cpp
 ed -s 'src/core/mdec.cpp' <<'PATCHEND'
-1191a
+1192a
 
 #endif
 .
-1162a
+1163a
 #ifdef __LIBRETRO__
   return;
 #else
@@ -2872,10 +2882,10 @@ inline bool Load(const std::string&, Error*) { return false; }
 PATCHEND
 # Modify: src/core/settings.cpp
 ed -s 'src/core/settings.cpp' <<'PATCHEND'
-2829a
+2920a
 #endif
 .
-2809a
+2900a
 #ifdef __LIBRETRO__
   // In libretro mode the frontend owns screenshots, save states, shaders, and
   // cheats. Only create dirs the core actually writes to at runtime.
@@ -2883,36 +2893,36 @@ ed -s 'src/core/settings.cpp' <<'PATCHEND'
   EnsureFolderExists(Cache);    // compiled shader/texture cache
 #else
 .
-1655a
+1665a
 #endif
 
 #ifdef __SWITCH__
     case RenderAPI::Deko3D:
       return GPURenderer::HardwareDeko3D;
 .
-1622a
+1632a
 #ifdef __SWITCH__
     case GPURenderer::HardwareDeko3D:
       return RenderAPI::Deko3D;
 #endif
 .
-1571a
+1581a
 #endif
 #ifdef __SWITCH__
   TRANSLATE_DISAMBIG_NOOP("Settings", "Deko3D", "GPURenderer"),
 .
-1555a
+1565a
 #ifdef __SWITCH__
   "Deko3D",
 #endif
 .
-628d
-627a
+635d
+634a
 #if defined(__ANDROID__) && !defined(__LIBRETRO__)
 .
 156d
 150,154d
-9d
+10d
 wq
 PATCHEND
 # Modify: src/core/sound_effect_manager.h
@@ -2966,73 +2976,108 @@ wq
 PATCHEND
 # Modify: src/core/system.cpp
 ed -s 'src/core/system.cpp' <<'PATCHEND'
-98s/O/o/
-6315,6332d
-6314a
+6075,6092d
+6074a
 
   if (gte_ar == DisplayAspectRatio::Auto())
     gte_ar = DisplayAspectRatio{16, 9};
   // else: explicit AR passed through → GTE correction for that ratio
 .
-6312,6313d
-6311a
+6072,6073d
+6071a
     GTE::SetAspectRatio(DisplayAspectRatio::Auto());
     return;
 .
-6308,6310d
-6307a
+6068,6070d
+6067a
 
   // No GTE correction without widescreen hack, for PAR 1:1, or for Stretch
   // (Stretch is delegated to the frontend's video settings in the libretro build).
   if (!g_settings.gpu_widescreen_hack || gte_ar == DisplayAspectRatio::PAR1_1() ||
       gte_ar == DisplayAspectRatio::Stretch())
 .
-5867a
+5627a
 #endif
 .
-5866a
+5626a
 #endif
 .
-5847a
+5607a
 #ifndef __LIBRETRO__
 .
-5843a
+5603a
 #endif
 .
-5826a
+5586a
 #ifndef __LIBRETRO__
 .
-5822a
+5582a
 #endif
 .
-5764a
+5524a
 #ifdef __LIBRETRO__
   return false;
 #else
 .
-5759a
+5519a
 #endif
 .
-5725a
+5485a
 #ifdef __LIBRETRO__
   return false;
 #else
 .
-5694a
+5471a
 #ifndef __LIBRETRO__
 .
-2410d
-2409a
+5429a
+#endif
+.
+5352a
+#ifndef __LIBRETRO__
+.
+3311a
+  return true;
+}
+
+bool System::LoadStateDataFromBuffer(std::span<const u8> data, u32 version, Error* error, bool update_display)
+{
+  if (IsShutdown()) [[unlikely]]
+  {
+    Error::SetStringView(error, "System is invalid.");
+    return false;
+  }
+
+  StateWrapper sw(data, StateWrapper::Mode::Read, version);
+  if (!DoState(sw, update_display))
+  {
+    Error::SetStringView(error, "Save state stream is corrupted.");
+    return false;
+  }
+
+  Cheats::ApplyAllOnDisableCodes();
+
+  InterruptExecution();
+
+  PerformanceCounters::Reset();
+  ResetThrottler();
+
+  if (update_display)
+    g_gpu.UpdateDisplay(true);
+
+.
+2134d
+2133a
     ((is_duplicate_frame || (s_state.throttler_enabled && !s_state.optimal_frame_pacing &&
                              current_time > s_state.next_frame_time &&
 .
-2051a
+1774a
 #endif
 .
-2048a
+1771a
 #ifndef __LIBRETRO__
 .
-1724a
+1447a
 
 #ifdef __LIBRETRO__
   // Only the state change is needed — the full pause/resume machinery is harmful per-frame.
@@ -3040,25 +3085,21 @@ ed -s 'src/core/system.cpp' <<'PATCHEND'
 #endif
 
 .
-1635a
+1358a
 #endif
 .
-1557a
+1280a
 #ifdef __LIBRETRO__
   return nullptr;
 #else
 .
-823a
+539a
 #endif
 .
-819a
+535a
 #ifndef __LIBRETRO__
 .
-541d
-540a
-#if defined(_WIN32) && !defined(__LIBRETRO__)
-.
-187a
+165a
 
 #ifdef __LIBRETRO__
 static bool StartMediaCapture(std::string path, bool capture_video, bool capture_audio, u32 video_width,
@@ -3072,19 +3113,7 @@ static void StopMediaCapture(std::unique_ptr<MediaCapture> cap)
 }
 #endif
 .
-105a
-#endif
-.
-101a
-#ifndef __LIBRETRO__
-.
-83a
-#endif
-.
-82a
-#ifndef __LIBRETRO__
-.
-26d
+28d
 wq
 PATCHEND
 # Modify: src/core/system.h
@@ -3092,8 +3121,10 @@ ed -s 'src/core/system.h' <<'PATCHEND'
 438a
 #endif
 .
-430a
+428a
 #ifdef __LIBRETRO__
+inline std::string GetNewCapturePath(const std::string&, const std::string_view, CaptureFileNameFormat,
+                                     std::string_view) { return {}; }
 inline std::string GetNewMediaCapturePath(const std::string_view title, const std::string_view container)
 {
   return {};
@@ -3116,6 +3147,9 @@ inline void StopMediaCapture()
 }
 #else
 .
+299a
+bool LoadStateDataFromBuffer(std::span<const u8> data, u32 version, Error* error, bool update_display);
+.
 235a
 #endif
 .
@@ -3131,11 +3165,11 @@ wq
 PATCHEND
 # Modify: src/core/timers.cpp
 ed -s 'src/core/timers.cpp' <<'PATCHEND'
-583a
+586a
 
 #endif
 .
-525a
+528a
 #ifdef __LIBRETRO__
   return;
 #else
@@ -3163,9 +3197,6 @@ ed -s 'src/core/video_presenter.cpp' <<'PATCHEND'
 1752s/^  //
 1791,1793s/^  //
 1795,1802s/^  //
-1813a
-#endif
-.
 1804,1809d
 1794d
 1764,1790d
@@ -3180,9 +3211,6 @@ void VideoPresenter::ReloadPostProcessingSettings(bool display, bool internal, b
 .
 1745,1751d
 1707,1742d
-1706a
-#ifndef __LIBRETRO__
-.
 1605a
 #endif
 .
@@ -3340,15 +3368,15 @@ wq
 PATCHEND
 # Modify: src/core/video_thread.cpp
 ed -s 'src/core/video_thread.cpp' <<'PATCHEND'
-178,181s/^/  /
-1128,1129s/^/  /
-1131,1137s/^/  /
-1142s/^  //
-1496,1500d
-1292,1293d
-1225,1237d
-1139,1141d
-1137a
+186,189s/^/  /
+1134,1135s/^/  /
+1137,1143s/^/  /
+1148s/^  //
+1523,1527d
+1306,1307d
+1239,1251d
+1145,1147d
+1143a
     }
     else
     {
@@ -3360,20 +3388,20 @@ ed -s 'src/core/video_thread.cpp' <<'PATCHEND'
       }
     }
 .
-1127a
+1133a
     if (g_gpu_device)
     {
 .
-1118,1125d
-1049d
-1048a
+1124,1131d
+1055d
+1054a
   if (g_gpu_device && g_gpu_device->HasMainSwapChain())
 .
-1029,1031d
-1007a
+1035,1037d
+1013a
   } // end non-libretro-sw path
 .
-923a
+929a
 #ifdef __LIBRETRO__
   // In libretro with software renderer, skip GPU device creation entirely.
   // Frames are pushed directly from VRAM via the libretro video callback.
@@ -3401,62 +3429,83 @@ ed -s 'src/core/video_thread.cpp' <<'PATCHEND'
 #endif
   {
 .
-835,838d
-789,798d
-761a
+841,844d
+795,804d
+767a
 #endif
 .
-751a
+757a
 #ifndef __LIBRETRO__
 .
-750a
+756a
 #endif
 .
-732a
+738a
 #ifndef __LIBRETRO__
 .
-615a
+621a
 #endif
 .
-587a
+593a
 #ifndef __LIBRETRO__
 .
-181a
+189a
         } while (available_size < size);
 .
-177d
-176a
+185d
+184a
       if (available_size < size)
       {
         do
 .
-36a
+37a
 #endif
 .
-35a
+36a
 #ifndef __LIBRETRO__
 .
-23d
-21d
+24d
+22d
 11d
 6d
 wq
 PATCHEND
 # Modify: src/core/video_thread.h
 ed -s 'src/core/video_thread.h' <<'PATCHEND'
-135a
-#endif
-.
-130a
+110a
+
+namespace Host {
+
+/// Called when the core is creating a render device.
+std::optional<WindowInfo> AcquireRenderWindow(RenderAPI render_api, bool fullscreen, bool exclusive_fullscreen,
+                                              Error* error);
+
+/// Returns the window type for the host.
+WindowInfoType GetRenderWindowInfoType();
+
+/// Called when the core is finished with a render window.
+void ReleaseRenderWindow();
+
+/// Called before a fullscreen transition occurs.
+bool CanChangeFullscreenMode(bool new_fullscreen_state);
+
 #ifdef __LIBRETRO__
 inline void OnVideoThreadRunIdleChanged(bool) {}
 inline bool SetScreensaverInhibit(bool, Error*) { return true; }
 #else
+/// Called when the pause state changes, or fullscreen UI opens.
+void OnVideoThreadRunIdleChanged(bool is_active);
+
+/// Changes the screensaver inhibit state.
+bool SetScreensaverInhibit(bool inhibit, Error* error);
+#endif
+
+} // namespace Host
 .
-47a
+46a
 #endif
 .
-44a
+43a
 #ifdef __LIBRETRO__
 inline bool StartFullscreenUI(bool fullscreen, Error* error)
 {
@@ -12146,6 +12195,7 @@ cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
 #include "core/controller.h"
 #include "core/core.h"
 #include "core/core_private.h"
+#include "core/performance_counters.h"
 #include "core/cpu_code_cache.h"
 #include "core/cpu_core.h"
 #include "util/page_fault_handler.h"
@@ -12161,6 +12211,7 @@ cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
 #include "core/system_private.h"
 #include "core/video_presenter.h"
 #include "core/video_thread.h"
+#include "core/video_thread_private.h"
 
 #include "scmversion/scmversion.h"
 
@@ -12204,7 +12255,6 @@ cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
 #include "common/log.h"
 #include "common/path.h"
 #include "common/string_util.h"
-#include "common/task_queue.h"
 #include "common/threading.h"
 #include "common/time_helpers.h"
 
@@ -12256,14 +12306,11 @@ static std::deque<std::pair<std::function<void()>, bool>> s_core_events;
 static std::condition_variable s_core_events_done;
 static u32 s_blocking_events_pending = 0;
 
-static TaskQueue s_async_task_queue;
-
 static std::vector<s16> s_audio_buffer;
 static constexpr u32 AUDIO_BUFFER_MAX_FRAMES = 2048;
 
 static std::vector<u32> s_video_framebuffer;
 static std::vector<u8> s_save_state_buffer;
-static Threading::Thread s_video_thread;
 
 static bool s_hw_render_enabled = false;
 static std::string s_boot_renderer; // renderer active at load time; changes require restart
@@ -12323,7 +12370,6 @@ static DiskControlInfo s_disk_control;
 
 // Forward declarations
 static void ProcessCoreThreadEvents();
-static void VideoThreadEntryPoint();
 static bool InitializeFoldersAndConfig(Error* error);
 static void UpdateControllers();
 static void UpdateVariables(bool force = false);
@@ -12612,15 +12658,7 @@ void Host::RunOnUIThread(std::function<void()> function, bool block)
   RunOnCoreThread(std::move(function), block);
 }
 
-void Host::QueueAsyncTask(std::function<void()> function)
-{
-  LibretroHost::s_async_task_queue.SubmitTask(std::move(function));
-}
-
-void Host::WaitForAllAsyncTasks()
-{
-  LibretroHost::s_async_task_queue.WaitForAll();
-}
+// Host::QueueAsyncTask and Host::WaitForAllAsyncTasks are provided by core.cpp
 
 // =============================================================================
 // Host:: namespace implementations — Settings
@@ -12826,11 +12864,7 @@ void LibretroHost::ProcessCoreThreadEvents()
   }
 }
 
-void LibretroHost::VideoThreadEntryPoint()
-{
-  Threading::SetNameOfCurrentThread("Video Thread");
-  VideoThread::Internal::VideoThreadEntryPoint();
-}
+// Video thread is now managed by VideoThread::ProcessStartup/ProcessShutdown via Core::CoreThreadInitialize
 
 bool LibretroHost::InitializeFoldersAndConfig(Error* error)
 {
@@ -14972,7 +15006,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_cpu_recompiler_icache", "Recompiler ICache", "ICache",
-      "Makes games run closer to their console framerate, at a small cost to performance.",
+      "Simulates stalls in the recompilers when the emulated CPU would have to fetch instructions into its cache. Makes games run closer to their console framerate, at a small cost to performance.",
       nullptr, "system",
       {{"false", "Disabled"}, {"true", "Enabled"}, {nullptr, nullptr}},
       "false"
@@ -14986,7 +15020,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_8mb_ram", "Enable 8MB RAM (Restart)", "8MB RAM",
-      "Expands RAM from 2MB to 8MB. Required by some homebrew.",
+      "Enables an additional 6MB of RAM to obtain a total of 2+6 = 8MB, usually present on dev consoles. Required by some homebrew and demos that use a larger heap size.",
       nullptr, "system",
       {{"false", "Disabled"}, {"true", "Enabled"}, {nullptr, nullptr}},
       "false"
@@ -15029,7 +15063,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_resolution_scale", "Internal Resolution Scale", "Resolution Scale",
-      "Upscales the game's rendering by the specified multiplier. Only applies to hardware renderers.",
+      "Setting this beyond 1x will enhance the resolution of rendered 3D polygons and lines. Only applies to hardware renderers.",
       nullptr, "video",
       #ifdef __SWITCH__
 	      {{"1", "1x (Native)"}, {"2", "2x"}, {"3", "3x"}, {"4", "4x"}, {"5", "5x"}, {"6", "6x"}, {"7", "7x"}, {"8", "8x"}, {nullptr, nullptr}}
@@ -15040,21 +15074,21 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_gpu_multisamples", "Multisample Antialiasing", "MSAA",
-      "Applies MSAA to reduce jagged edges. Higher values are more demanding. Hardware renderers only.",
+      "Uses multi-sampled anti-aliasing when rendering 3D polygons. Can improve visuals with a lower performance requirement compared to upscaling, but often introduces rendering errors. Hardware renderers only.",
       nullptr, "video",
       {{"1", "Disabled"}, {"2", "2x MSAA"}, {"4", "4x MSAA"}, {"8", "8x MSAA"}, {"16", "16x MSAA"}, {nullptr, nullptr}},
       "1"
     },
     {
       "goosestation_texture_filter", "Texture Filtering", "Texture Filter",
-      "Smooths out the blockiness of magnified textures on 3D objects.",
+      "Smooths out the blockiness of magnified textures on 3D objects by using filtering. Will have a greater effect on higher resolution scales.",
       nullptr, "video",
       {{"Nearest", "Nearest (Default)"}, {"Bilinear", "Bilinear"}, {"BilinearBinAlpha", "Bilinear (No Edge Blending)"}, {"JINC2", "JINC2"}, {"JINC2BinAlpha", "JINC2 (No Edge Blending)"}, {"xBR", "xBR"}, {"xBRBinAlpha", "xBR (No Edge Blending)"}, {"Scale2x", "Scale2x"}, {"Scale3x", "Scale3x"}, {"MMPX", "MMPX"}, {"MMPXEnhanced", "MMPX Enhanced"}, {nullptr, nullptr}},
       "Nearest"
     },
     {
       "goosestation_sprite_texture_filter", "Sprite Texture Filtering", "Sprite Filter",
-      "Smooths out the blockiness of magnified textures on 2D objects.",
+      "Smooths out the blockiness of magnified textures on 2D objects by using filtering. This filter only applies to sprites and other 2D elements, such as the HUD.",
       nullptr, "video",
       {{"Nearest", "Nearest (Default)"}, {"Bilinear", "Bilinear"}, {"BilinearBinAlpha", "Bilinear (No Edge Blending)"}, {"JINC2", "JINC2"}, {"JINC2BinAlpha", "JINC2 (No Edge Blending)"}, {"xBR", "xBR"}, {"xBRBinAlpha", "xBR (No Edge Blending)"}, {"Scale2x", "Scale2x"}, {"Scale3x", "Scale3x"}, {"MMPX", "MMPX"}, {"MMPXEnhanced", "MMPX Enhanced"}, {nullptr, nullptr}},
       "Nearest"
@@ -15068,7 +15102,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_deinterlacing", "Deinterlacing Mode", "Deinterlacing",
-      "Determines which algorithm is used to convert interlaced frames to progressive for display on your system.",
+      "Determines which algorithm is used to convert interlaced frames to progressive for display on your system. Progressive rendering provides the best quality output, but some games require interlaced rendering.",
       nullptr, "video",
       {{"Progressive", "Progressive"}, {"Adaptive", "Adaptive"}, {"Weave", "Weave"}, {"Blend", "Blend"}, {"Disabled", "Disabled"}, {nullptr, nullptr}},
       "Progressive"
@@ -15089,7 +15123,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_gpu_downsample_mode", "Downsampling Mode", "Downsample",
-      "Downsamples the rendered image prior to displaying it. Can improve overall image quality in mixed 2D/3D games.",
+      "Downsamples the rendered image prior to displaying it. Can improve overall image quality in mixed 2D/3D games, but should be disabled for pure 3D games.",
       nullptr, "video",
       {{"Disabled", "Disabled"}, {"Box", "Box Filter"}, {"Adaptive", "Adaptive"}, {nullptr, nullptr}},
       "Disabled"
@@ -15110,7 +15144,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_gpu_force_video_timing", "Force Video Timing", "Force Timing",
-      "Force NTSC or PAL video timing regardless of disc region.",
+      "Utilizes the chosen frame timing regardless of the active region. Can be used to force PAL games to run at 60Hz or NTSC games to run at 50Hz. For most games with speed tied to framerate, this will result in the game running faster or slower.",
       nullptr, "video",
       {{"Disabled", "Disabled (Auto)"}, {"NTSC", "NTSC (60Hz)"}, {"PAL", "PAL (50Hz)"}, {nullptr, nullptr}},
       "Disabled"
@@ -15145,7 +15179,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_gpu_modulation_crop", "Modulation Crop", "Mod Crop",
-      "Crops vertex colours to 5:5:5 before modulating with the texture colour, which typically results in more visible banding.",
+      "Crops vertex colours to 5:5:5 before modulating with the texture colour, which typically results in more visible banding. This is a characteristic of the old GPUs found in early model consoles.",
       nullptr, "video",
       {{"false", "Disabled"}, {"true", "Enabled"}, {nullptr, nullptr}},
       "false"
@@ -15170,7 +15204,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     // =====================================================================
     {
       "goosestation_pgxp_enable", "PGXP Geometry Correction", "PGXP",
-      "Reduces \"wobbly\" polygons by attempting to preserve the fractional component through memory transfers. Hardware renderers only.",
+      "Reduces \"wobbly\" polygons and \"warping\" textures that are common in PS1 games. May not be compatible with all games. Hardware renderers only.",
       nullptr, "pgxp",
       {{"false", "Disabled"}, {"true", "Enabled"}, {nullptr, nullptr}},
       "false"
@@ -15198,14 +15232,14 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_pgxp_depth_buffer", "PGXP Depth Buffer", "Depth Buffer",
-      "Reduces polygon Z-fighting through depth testing. Low compatibility with games.",
+      "Attempts to reduce polygon Z-fighting by testing pixels against the depth values from PGXP. Low compatibility, but can work well in some games. Other games may need a threshold adjustment.",
       nullptr, "pgxp",
       {{"false", "Disabled"}, {"true", "Enabled"}, {nullptr, nullptr}},
       "false"
     },
     {
       "goosestation_pgxp_vertex_cache", "PGXP Vertex Cache", "Vertex Cache",
-      "Uses screen positions to resolve PGXP data. May improve visuals in some games.",
+      "Uses screen-space vertex positions to obtain precise positions, instead of tracking memory accesses. Can provide PGXP compatibility for some games that are not compatible with the CPU mode.",
       nullptr, "pgxp",
       {{"false", "Disabled"}, {"true", "Enabled"}, {nullptr, nullptr}},
       "false"
@@ -15226,7 +15260,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_pgxp_tolerance", "PGXP Geometry Tolerance", "Tolerance",
-      "Sets a threshold for discarding precise values when exceeded. May help with glitches in some games.",
+      "Discards precise geometry when it is found to be offset past the specified threshold. This can help with games that have glitches when PGXP is enabled.",
       nullptr, "pgxp",
       {{"-1.0", "Automatic"}, {"0.5", "0.5"}, {"1.0", "1.0"}, {"2.0", "2.0"}, {"4.0", "4.0"}, {"8.0", "8.0"}, {"16.0", "16.0"}, {nullptr, nullptr}},
       "-1.0"
@@ -15247,7 +15281,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_pgxp_depth_clear_threshold", "PGXP Depth Clear Threshold", "Depth Threshold",
-      "Sets a threshold for discarding the emulated depth buffer. May help in some games.",
+      "Determines the increase in depth that will result in the depth buffer being cleared. Can help with Z-fighting in some games.",
       nullptr, "pgxp",
       {{"300", "300"}, {"500", "500"}, {"1000", "1000"}, {"1024", "1024"}, {"2048", "2048"}, {"4096", "4096 (Default)"}, {"8192", "8192"}, {"16384", "16384"}, {nullptr, nullptr}},
       "4096"
@@ -15378,7 +15412,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_memory_card_use_playlist_title", "Use Playlist Title for Memory Cards", "Playlist Title",
-      "Use the playlist/M3U title for per-game memory cards instead of individual disc titles.",
+      "When playing a multi-disc game and using per-game (title) memory cards, a single memory card will be used for all discs. If disabled, a separate card will be used for each disc.",
       nullptr, "input",
       {{"true", "Enabled"}, {"false", "Disabled"}, {nullptr, nullptr}},
       "true"
@@ -15389,14 +15423,14 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     // =====================================================================
     {
       "goosestation_cd_read_speedup", "CD-ROM Read Speedup", "Read Speedup",
-      "Speeds up CD-ROM reads by the specified factor. May improve loading speeds in some games, and break others.",
+      "Speeds up CD-ROM reads by the specified factor. Only applies to double-speed reads, and is ignored when audio is playing. May improve loading speeds in some games, and break others.",
       nullptr, "cdrom",
       {{"1", "1x (Default)"}, {"2", "2x"}, {"3", "3x"}, {"4", "4x"}, {"5", "5x"}, {"6", "6x"}, {"7", "7x"}, {"8", "8x"}, {"10", "10x"}, {"14", "14x"}, {"20", "20x"}, {nullptr, nullptr}},
       "1"
     },
     {
       "goosestation_cd_seek_speedup", "CD-ROM Seek Speedup", "Seek Speedup",
-      "Speeds up CD-ROM seeks by the specified factor. May improve loading speeds in some games, and break others.",
+      "Reduces the simulated time for the CD-ROM sled to move to different areas of the disc. Can improve loading times, but may crash games which do not expect the CD-ROM to operate faster.",
       nullptr, "cdrom",
       {{"1", "1x (Default)"}, {"2", "2x"}, {"3", "3x"}, {"5", "5x"}, {"7", "7x"}, {"10", "10x"}, {"0", "Instant"}, {nullptr, nullptr}},
       "1"
@@ -15417,14 +15451,14 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_cdrom_load_image_to_ram", "Preload Image to RAM", "Preload RAM",
-      "Loads the game image into RAM. Useful for network paths that may become unreliable during gameplay.",
+      "Loads the game image into RAM. Useful for network paths that may become unreliable during gameplay. In some cases also eliminates stutter when games initiate audio track playback.",
       nullptr, "cdrom",
       {{"false", "Disabled"}, {"true", "Enabled"}, {nullptr, nullptr}},
       "false"
     },
     {
       "goosestation_cdrom_load_image_patches", "Apply Image Patches (Restart)", "Image Patches",
-      "Automatically applies patches to disc images when they are present, currently only PPF is supported.",
+      "Automatically applies patches to disc images when they are present in the same directory. Currently only PPF patches are supported.",
       nullptr, "cdrom",
       {{"false", "Disabled"}, {"true", "Enabled"}, {nullptr, nullptr}},
       "false"
@@ -15459,7 +15493,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     },
     {
       "goosestation_cdrom_ignore_host_subcode", "Ignore Drive Subcode", "Ignore Subcode",
-      "Ignores the subchannel provided by the drive when using physical discs, instead always generating subchannel data. Can improve read reliability on some drives.",
+      "Ignores the subchannel provided by the drive when using physical discs, instead always generating subchannel data. Won't work with libcrypt protected games, but can improve read reliability on some drives.",
       nullptr, "cdrom",
       {{"false", "Disabled"}, {"true", "Enabled"}, {nullptr, nullptr}},
       "false"
@@ -15884,12 +15918,12 @@ RETRO_API void retro_init(void)
   Log::RegisterCallback(DuckStationLogCallback, nullptr);
 
   Error error;
-  if (!System::PerformEarlyHardwareChecks(&error)) {
+  if (!Core::PerformEarlyHardwareChecks(&error)) {
     LibretroLog(RETRO_LOG_ERROR, "[GooseStation] EarlyHWChecks failed: %s\n", error.GetDescription().c_str());
     return;
   }
 
-  if (!System::ProcessStartup(&error))
+  if (!Core::ProcessStartup(&error))
   {
     LibretroLog(RETRO_LOG_ERROR, "[GooseStation] ProcessStartup() failed: %s\n", error.GetDescription().c_str());
     return;
@@ -15903,17 +15937,14 @@ RETRO_API void retro_init(void)
     return;
   }
 
-  if (!System::CoreThreadInitialize(&error))
+  if (!Core::CoreThreadInitialize(false, &error))
   {
     LibretroLog(RETRO_LOG_ERROR, "[GooseStation] CoreThreadInitialize() failed: %s\n",
                 error.GetDescription().c_str());
     return;
   }
 
-  LibretroHost::s_async_task_queue.SetWorkerCount(1);
   LibretroHost::s_core_initialized = true;
-
-  LibretroHost::s_video_thread.Start(&LibretroHost::VideoThreadEntryPoint);
 
   LibretroLog(RETRO_LOG_INFO, "[GooseStation] Initialized successfully\n");
 }
@@ -15926,24 +15957,16 @@ RETRO_API void retro_deinit(void)
     LibretroHost::s_game_loaded = false;
   }
 
-  if (LibretroHost::s_video_thread.Joinable())
-  {
-    VideoThread::Internal::RequestShutdown();
-    LibretroHost::s_video_thread.Join();
-  }
-
-  LibretroHost::s_async_task_queue.SetWorkerCount(0);
-
   if (LibretroHost::s_core_initialized)
   {
     LibretroHost::ProcessCoreThreadEvents();
-    System::CoreThreadShutdown();
+    Core::CoreThreadShutdown();
     LibretroHost::s_core_initialized = false;
   }
 
   if (LibretroHost::s_system_initialized)
   {
-    System::ProcessShutdown();
+    Core::ProcessShutdown();
     LibretroHost::s_system_initialized = false;
   }
 
@@ -16469,24 +16492,8 @@ PATCHEND
 # Modify: src/util/CMakeLists.txt
 ed -s 'src/util/CMakeLists.txt' <<'PATCHEND'
 194,195s/^/  /
-276,340d
-264,274d
-263a
-  set_source_files_properties(
-    deko3d_device.cpp deko3d_memory_heap.cpp deko3d_pipeline.cpp
-    deko3d_stream_buffer.cpp deko3d_texture.cpp
-    PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE
-  )
-  target_link_libraries(util PRIVATE deko3d nx uam)
-.
-261,262d
-260a
-  set_source_files_properties(metal_device.mm metal_stream_buffer.mm PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
-  find_library(IOK_LIBRARY IOKit REQUIRED)
-  find_library(FOUNDATION_LIBRARY Foundation REQUIRED)
-  find_library(METAL_LIBRARY Metal REQUIRED)
-  find_library(QUARTZCORE_LIBRARY QuartzCore REQUIRED)
-  target_link_libraries(util PRIVATE ${IOK_LIBRARY} ${FOUNDATION_LIBRARY} ${METAL_LIBRARY} ${QUARTZCORE_LIBRARY})
+277,341d
+271a
 elseif(SWITCH)
   target_sources(util PRIVATE
     deko3d_device.cpp
@@ -16499,13 +16506,17 @@ elseif(SWITCH)
     deko3d_stream_buffer.h
     deko3d_texture.cpp
     deko3d_texture.h
+  )
+  set_source_files_properties(
+    deko3d_device.cpp deko3d_memory_heap.cpp deko3d_pipeline.cpp
+    deko3d_stream_buffer.cpp deko3d_texture.cpp
+    PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE
+  )
+  target_link_libraries(util PRIVATE deko3d nx uam)
 .
-200,255d
-198d
+198,216d
 197a
-if(LINUX)
-  target_link_libraries(util PRIVATE UDEV::UDEV)
-elseif(APPLE)
+if(WIN32 AND NOT BUILD_LIBRETRO)
 .
 196d
 195a
@@ -16576,29 +16587,32 @@ wq
 PATCHEND
 # Modify: src/util/audio_stream.cpp
 ed -s 'src/util/audio_stream.cpp' <<'PATCHEND'
+152a
+#endif
+.
+144d
+143a
+#else
+#ifndef __LIBRETRO__
+.
+139d
+138a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
 130a
-#endif
-.
-122a
 #ifndef __LIBRETRO__
 .
-121a
-#endif
+110d
+109a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
 .
-114a
-#ifndef __LIBRETRO__
+105d
+104a
+#if !defined(__ANDROID__) && !defined(__LIBRETRO__)
 .
-97a
-#endif
-.
-94a
-#ifndef __LIBRETRO__
-.
-78a
-#endif
-.
-75a
-#ifndef __LIBRETRO__
+86d
+85a
+#if !defined(__ANDROID__) && !defined(__LIBRETRO__)
 .
 wq
 PATCHEND
@@ -20214,10 +20228,10 @@ wq
 PATCHEND
 # Modify: src/util/imgui_manager.h
 ed -s 'src/util/imgui_manager.h' <<'PATCHEND'
-287a
+299a
 #endif // !__LIBRETRO__
 .
-264,265d
+276,277d
 38,46d
 4a
 
@@ -20907,10 +20921,10 @@ public:
 PATCHEND
 # Modify: src/util/postprocessing_shader_slang.cpp
 ed -s 'src/util/postprocessing_shader_slang.cpp' <<'PATCHEND'
-1084a
+1231a
 #endif
 .
-1083a
+1230a
 #ifndef __LIBRETRO__
 .
 wq
