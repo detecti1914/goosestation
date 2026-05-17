@@ -1,0 +1,76 @@
+### GooseStation libretro core builder — Linux (fully self-contained)
+###
+### Usage:
+###   docker build -f Dockerfile.linux -t goosestation-builder-linux .
+###   docker run --rm -v "$PWD/dist:/work/dist:Z" goosestation-builder-linux linux
+###
+### Deps and source are baked into the image. Only dist/ is mounted for output.
+### Rebuild when build-linux-deps.sh, goosify.sh, or UPSTREAM_COMMIT changes.
+
+# syntax=docker/dockerfile:1.6
+FROM debian:trixie-slim@sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a
+
+ARG TARGETARCH
+ARG UPSTREAM_COMMIT=54feef27dab1b105c30ad341e503c399ebb2409d
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CC=clang
+ENV CXX=clang++
+ENV LINUX_BUILD_DIR=/opt/linux-build
+ENV LINUX_DEPS_DIR=/opt/linux-build/deps
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends eatmydata \
+    && eatmydata apt-get install -y --no-install-recommends \
+        make \
+        libc6-dev \
+        clang \
+        llvm-dev \
+        lld \
+        cmake \
+        ninja-build \
+        git \
+        curl \
+        ca-certificates \
+        tar \
+        xz-utils \
+        ed \
+        python3 \
+        pkg-config \
+        zlib1g-dev \
+        libzstd-dev \
+        libpng-dev \
+        libjpeg62-turbo-dev \
+        libwebp-dev \
+        libcurl4-openssl-dev \
+        libsdl3-dev \
+        libshaderc-dev \
+        libspirv-cross-c-shared-dev \
+        libvulkan-dev \
+        file
+
+# --- Layer 2: Linux deps (cpuinfo) ---
+COPY build-linux-deps.sh /tmp/build-linux-deps.sh
+RUN BUILD_DIR=${LINUX_BUILD_DIR} bash /tmp/build-linux-deps.sh \
+    && touch ${LINUX_DEPS_DIR}/.deps-ready \
+    && rm /tmp/build-linux-deps.sh
+
+# --- Layer 3: upstream source fetch + goosify ---
+COPY goosify.sh /tmp/goosify.sh
+RUN mkdir -p /work/.cache /work/src \
+    && curl -fsSL "https://github.com/stenzek/duckstation/archive/${UPSTREAM_COMMIT}.tar.gz" \
+        -o /work/.cache/duckstation-${UPSTREAM_COMMIT}.tar.gz \
+    && tar -xzf /work/.cache/duckstation-${UPSTREAM_COMMIT}.tar.gz -C /work/src \
+    && cp /tmp/goosify.sh /work/src/duckstation-${UPSTREAM_COMMIT}/goosify.sh \
+    && cd /work/src/duckstation-${UPSTREAM_COMMIT} && bash goosify.sh \
+    && touch .goosified \
+    && rm /tmp/goosify.sh
+
+# --- Layer 4: project files ---
+WORKDIR /work
+COPY . /work
+
+ENTRYPOINT ["make"]

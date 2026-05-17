@@ -1,0 +1,94 @@
+### GooseStation libretro core builder — Android (fully self-contained)
+###
+### Usage:
+###   docker build -f Dockerfile.android -t goosestation-builder-android .
+###   docker run --rm -v "$PWD/dist:/work/dist:Z" goosestation-builder-android android
+###
+### NDK and cross-compiled deps are baked into the image. No .cache/ mount needed;
+### only dist/ is mounted for output. Rebuild image when deps or upstream commit change.
+###
+### Layer ordering (least → most frequent changes):
+###   1. apt packages
+###   2. NDK
+###   3. cross-compiled deps (zstd, libpng, shaderc, etc.)
+###   4. upstream source fetch + goosify
+###   5. remaining project files (Makefile, etc.)
+
+# syntax=docker/dockerfile:1.6
+FROM debian:trixie-slim@sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a
+
+ARG TARGETARCH
+ARG ANDROID_NDK_VERSION=r29
+ARG ANDROID_ABI=arm64-v8a
+ARG UPSTREAM_COMMIT=54feef27dab1b105c30ad341e503c399ebb2409d
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ANDROID_NDK=/opt/android-ndk-${ANDROID_NDK_VERSION}
+ENV ANDROID_BUILD_DIR=/opt/android-build
+ENV ANDROID_DEPS_DIR=/opt/android-build/deps
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends eatmydata \
+    && eatmydata apt-get install -y --no-install-recommends \
+        make \
+        cmake \
+        ninja-build \
+        clang \
+        lld \
+        git \
+        curl \
+        ca-certificates \
+        tar \
+        xz-utils \
+        unzip \
+        ed \
+        python3 \
+        pkg-config \
+        zlib1g-dev \
+        file
+
+# --- Layer 2: NDK ---
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+        arm64) \
+            NDK_URL="https://github.com/SnowNF/ndk-aarch64-linux/releases/download/0.0.2/android-ndk-${ANDROID_NDK_VERSION}-linux-aarch64.tar.gz"; \
+            curl -fsSL "$NDK_URL" -o /tmp/ndk.tar.gz; \
+            mkdir -p ${ANDROID_NDK}; \
+            tar -xf /tmp/ndk.tar.gz -C ${ANDROID_NDK} --strip-components=1; \
+            rm /tmp/ndk.tar.gz ;; \
+        amd64) \
+            NDK_URL="https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_VERSION}-linux.zip"; \
+            curl -fsSL "$NDK_URL" -o /tmp/ndk.zip; \
+            unzip -q /tmp/ndk.zip -d /tmp/ndk-extract; \
+            mv /tmp/ndk-extract/android-ndk-${ANDROID_NDK_VERSION} ${ANDROID_NDK}; \
+            rm -rf /tmp/ndk.zip /tmp/ndk-extract ;; \
+        *) echo "Unsupported arch: $(dpkg --print-architecture)"; exit 1 ;; \
+    esac \
+    && touch ${ANDROID_NDK}/.ndk-ready
+
+# --- Layer 3: cross-compiled deps ---
+COPY build-android-deps.sh /tmp/build-android-deps.sh
+RUN NDK=${ANDROID_NDK} ANDROID_ABI=${ANDROID_ABI} BUILD_DIR=${ANDROID_BUILD_DIR} \
+        bash /tmp/build-android-deps.sh \
+    && touch ${ANDROID_DEPS_DIR}/.deps-ready \
+    && rm /tmp/build-android-deps.sh
+
+# --- Layer 4: upstream source fetch + goosify ---
+COPY goosify.sh /tmp/goosify.sh
+RUN mkdir -p /work/.cache /work/src \
+    && curl -fsSL "https://github.com/stenzek/duckstation/archive/${UPSTREAM_COMMIT}.tar.gz" \
+        -o /work/.cache/duckstation-${UPSTREAM_COMMIT}.tar.gz \
+    && tar -xzf /work/.cache/duckstation-${UPSTREAM_COMMIT}.tar.gz -C /work/src \
+    && cp /tmp/goosify.sh /work/src/duckstation-${UPSTREAM_COMMIT}/goosify.sh \
+    && cd /work/src/duckstation-${UPSTREAM_COMMIT} && bash goosify.sh \
+    && touch .goosified \
+    && rm /tmp/goosify.sh
+
+# --- Layer 5: project files ---
+WORKDIR /work
+COPY . /work
+
+ENTRYPOINT ["make"]

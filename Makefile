@@ -15,10 +15,8 @@ BUILD_ROOT := $(ROOT)/build
 DIST_DIR := $(ROOT)/dist
 
 ANDROID_NDK_VERSION ?= r29
+RETROARCH_COMMIT ?= a340c70468
 NDK_HOST_ARCH := $(shell uname -m)
-# Containerized cross-build: cache archive under .cache/, extract per-run to
-# /tmp (avoids bind-mount symlink issues on macOS+podman). Re-extract is ~30s.
-# Native-host builds with system NDK aren't supported here — use Docker.
 ifeq ($(NDK_HOST_ARCH),$(filter $(NDK_HOST_ARCH),aarch64 arm64))
 ANDROID_NDK_ARCHIVE := $(CACHE_DIR)/android-ndk-$(ANDROID_NDK_VERSION)-linux-aarch64.tar.gz
 ANDROID_NDK_URL := https://github.com/SnowNF/ndk-aarch64-linux/releases/download/0.0.2/android-ndk-$(ANDROID_NDK_VERSION)-linux-aarch64.tar.gz
@@ -26,20 +24,17 @@ else
 ANDROID_NDK_ARCHIVE := $(CACHE_DIR)/android-ndk-$(ANDROID_NDK_VERSION)-linux.zip
 ANDROID_NDK_URL := https://dl.google.com/android/repository/android-ndk-$(ANDROID_NDK_VERSION)-linux.zip
 endif
-ANDROID_NDK := /tmp/android-ndk-$(ANDROID_NDK_VERSION)
+ANDROID_NDK ?= $(CACHE_DIR)/android-ndk-$(ANDROID_NDK_VERSION)
 ANDROID_ABI ?= arm64-v8a
 ANDROID_PLATFORM ?= android-28
 
-# Cache linux extras (cpuinfo — not packaged on Debian) under .cache/
-# alongside other targets.
 HOST_ARCH := $(shell uname -m)
-LINUX_BUILD_DIR := $(CACHE_DIR)/linux-$(HOST_ARCH)
-LINUX_DEPS_DIR := $(LINUX_BUILD_DIR)/deps
+LINUX_BUILD_DIR ?= $(CACHE_DIR)/linux-$(HOST_ARCH)
+LINUX_DEPS_DIR ?= $(LINUX_BUILD_DIR)/deps
 
 MINGW_PREFIX ?= x86_64-w64-mingw32
-# Cache mingw deps under .cache/ so they survive `make clean` and `--rm` containers.
-MINGW_BUILD_DIR := $(CACHE_DIR)/mingw
-MINGW_DEPS_DIR := $(MINGW_BUILD_DIR)/deps
+MINGW_BUILD_DIR ?= $(CACHE_DIR)/mingw
+MINGW_DEPS_DIR ?= $(MINGW_BUILD_DIR)/deps
 
 MACOS_BUILD_DIR := $(CACHE_DIR)/macos
 MACOS_DEPS_DIR := $(MACOS_BUILD_DIR)/deps
@@ -75,6 +70,8 @@ help:
 all: linux android windows
 
 prepare: $(SRC_DIR)/.goosified
+	@mkdir -p "$(DIST_DIR)" "$(CACHE_DIR)"
+	@echo "Prepared host dirs: $(DIST_DIR) $(CACHE_DIR)"
 
 $(TARBALL):
 	@mkdir -p $(CACHE_DIR)
@@ -96,9 +93,8 @@ LINUX_BUILT := $(BUILD_ROOT)/linux/src/goosestation-libretro/goosestation_libret
 LINUX_UNSTRIPPED := $(LINUX_DIST_DIR)/goosestation_libretro.unstripped.so
 LINUX_SO := $(LINUX_DIST_DIR)/goosestation_libretro.so
 
-# Cache android deps under .cache/ so they survive `make clean` and `--rm` containers.
-ANDROID_BUILD_DIR := $(CACHE_DIR)/android
-ANDROID_DEPS_DIR := $(ANDROID_BUILD_DIR)/deps
+ANDROID_BUILD_DIR ?= $(CACHE_DIR)/android
+ANDROID_DEPS_DIR ?= $(ANDROID_BUILD_DIR)/deps
 
 ANDROID_BUILT := $(BUILD_ROOT)/android/src/goosestation-libretro/goosestation_libretro.so
 ANDROID_UNSTRIPPED := $(DIST_DIR)/android/goosestation_libretro.unstripped.so
@@ -130,10 +126,12 @@ $(LINUX_UNSTRIPPED): prepare $(LINUX_DEPS_DIR)/.deps-ready
 	@echo "Linux core built (unstripped):"
 	@echo "  $@"
 
+ifneq ($(filter $(CACHE_DIR)/%,$(LINUX_DEPS_DIR)),)
 $(LINUX_DEPS_DIR)/.deps-ready: $(ROOT)/build-linux-deps.sh
 	@echo "==> Building Linux extras into $(LINUX_BUILD_DIR)..."
 	@BUILD_DIR=$(LINUX_BUILD_DIR) bash $(ROOT)/build-linux-deps.sh
 	@touch $@
+endif
 
 $(LINUX_SO): $(LINUX_UNSTRIPPED)
 	@cp $< $@
@@ -145,7 +143,7 @@ $(LINUX_SO): $(LINUX_UNSTRIPPED)
 android: $(ANDROID_SO)
 android-unstripped: $(ANDROID_UNSTRIPPED)
 
-$(ANDROID_UNSTRIPPED): prepare $(ANDROID_DEPS_DIR)/.deps-ready $(ANDROID_NDK)/.gs-ready
+$(ANDROID_UNSTRIPPED): prepare $(ANDROID_DEPS_DIR)/.deps-ready $(ANDROID_NDK)/.ndk-ready
 	@echo "==> Configuring Android build"
 	@$(CMAKE) -S $(SRC_DIR) -B $(BUILD_ROOT)/android \
 		-DCMAKE_TOOLCHAIN_FILE=$(ANDROID_NDK)/build/cmake/android.toolchain.cmake \
@@ -177,24 +175,41 @@ $(ANDROID_SO): $(ANDROID_UNSTRIPPED)
 	@echo "Android core built (stripped):"
 	@echo "  $@"
 
-$(ANDROID_DEPS_DIR)/.deps-ready: $(ROOT)/build-android-deps.sh $(ANDROID_NDK)/.gs-ready
-	@echo "==> Building Android dependencies (cached at $(ANDROID_BUILD_DIR))..."
-	@NDK=$(ANDROID_NDK) ANDROID_ABI=$(ANDROID_ABI) BUILD_DIR=$(ANDROID_BUILD_DIR) bash $(ROOT)/build-android-deps.sh
-	@touch $@
-
+# Native builds: download NDK and build deps into .cache/
+# Docker: NDK + deps pre-installed externally, rules skipped.
+ifneq ($(filter $(CACHE_DIR)/%,$(ANDROID_NDK)),)
 $(ANDROID_NDK_ARCHIVE):
 	@mkdir -p $(CACHE_DIR)
 	@echo "==> Fetching NDK archive..."
 	@curl -fsSL $(ANDROID_NDK_URL) -o $@.tmp && mv $@.tmp $@
 
-$(ANDROID_NDK)/.gs-ready: $(ANDROID_NDK_ARCHIVE)
+$(ANDROID_NDK_ARCHIVE).ndk-downloaded: $(ANDROID_NDK_ARCHIVE)
+	@touch $@
+
+$(ANDROID_NDK)/.ndk-ready: $(ANDROID_NDK_ARCHIVE).ndk-downloaded
 	@echo "==> Extracting NDK to $(ANDROID_NDK)..."
 	@rm -rf $(ANDROID_NDK)
 	@case "$(ANDROID_NDK_ARCHIVE)" in \
-		*.zip) unzip -q $< -d /tmp ;; \
-		*.tar.gz) mkdir -p $(ANDROID_NDK) && tar -xf $< -C $(ANDROID_NDK) --strip-components=1 ;; \
+		*.zip) TMPDIR=$$(mktemp -d /tmp/android-ndk-extract-XXXXXX) && \
+			unzip -q $(ANDROID_NDK_ARCHIVE) -d "$$TMPDIR" && \
+			EXTRACT_DIR=$$(find "$$TMPDIR" -maxdepth 1 -mindepth 1 -type d -print -quit) && \
+			if [ -n "$$EXTRACT_DIR" ]; then \
+				mv "$$EXTRACT_DIR" $(ANDROID_NDK); \
+			else \
+				mkdir -p $(ANDROID_NDK) && mv "$$TMPDIR"/* $(ANDROID_NDK); \
+			fi && \
+			rm -rf "$$TMPDIR" ;; \
+		*.tar.gz) mkdir -p $(ANDROID_NDK) && tar -xf $(ANDROID_NDK_ARCHIVE) -C $(ANDROID_NDK) --strip-components=1 ;; \
 	esac
 	@touch $@
+endif
+
+ifneq ($(filter $(CACHE_DIR)/%,$(ANDROID_DEPS_DIR)),)
+$(ANDROID_DEPS_DIR)/.deps-ready: $(ROOT)/build-android-deps.sh $(ANDROID_NDK)/.ndk-ready
+	@echo "==> Building Android dependencies (cached at $(ANDROID_BUILD_DIR))..."
+	@NDK=$(ANDROID_NDK) ANDROID_ABI=$(ANDROID_ABI) BUILD_DIR=$(ANDROID_BUILD_DIR) bash $(ROOT)/build-android-deps.sh
+	@touch $@
+endif
 
 WINDOWS_BUILT := $(BUILD_ROOT)/windows/bin/goosestation_libretro.dll
 WINDOWS_UNSTRIPPED := $(DIST_DIR)/windows/goosestation_libretro.unstripped.dll
@@ -251,6 +266,7 @@ $(WINDOWS_DLL): $(WINDOWS_UNSTRIPPED)
 	@echo "Windows core built (stripped):"
 	@echo "  $@"
 
+ifneq ($(filter $(CACHE_DIR)/%,$(MINGW_DEPS_DIR)),)
 $(MINGW_DEPS_DIR)/.deps-ready: $(ROOT)/build-mingw-deps.sh
 	@command -v clang >/dev/null || { echo "ERROR: clang not in PATH"; exit 1; }
 	@echo "==> Building Windows (mingw) dependencies with LLVM (cached at $(MINGW_BUILD_DIR))..."
@@ -259,6 +275,7 @@ $(MINGW_DEPS_DIR)/.deps-ready: $(ROOT)/build-mingw-deps.sh
 		AR="llvm-ar" RANLIB="llvm-ranlib" RC="llvm-rc" WINDRES="llvm-windres" \
 		BUILD_DIR=$(MINGW_BUILD_DIR) bash $(ROOT)/build-mingw-deps.sh
 	@touch $@
+endif
 
 MACOS_DIST_DIR := $(DIST_DIR)/macos-$(HOST_ARCH)
 MACOS_BUILT := $(BUILD_ROOT)/macos/src/goosestation-libretro/goosestation_libretro.dylib
@@ -314,8 +331,6 @@ $(SWITCH_LIB): prepare
 	@echo "==> Configuring Switch build"
 	@$(CMAKE) -S $(SRC_DIR) -B $(BUILD_ROOT)/switch \
 		-DCMAKE_TOOLCHAIN_FILE=$(DEVKITPRO)/cmake/Switch.cmake \
-		-DCMAKE_C_COMPILER_LAUNCHER=ccache \
-		-DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DBUILD_LIBRETRO=ON \
 		-DBUILD_REGTEST=OFF \
@@ -345,7 +360,7 @@ $(SWITCH_LIB): prepare
 	@echo "Switch core built (static archive):"
 	@echo "  $@"
 
-RETROARCH_DIR    := $(CACHE_DIR)/RetroArch
+RETROARCH_DIR    ?= $(CACHE_DIR)/RetroArch
 RETROARCH_PATCHES := $(ROOT)/patches/retroarch
 SWITCH_RA_NRO    := $(SWITCH_DIST_DIR)/goosestation_libretro_libnx.nro
 
@@ -387,3 +402,58 @@ clean:
 
 distclean: clean
 	rm -rf $(SRC_ROOT) $(CACHE_DIR)
+
+# Docker helper targets: each platform has its own self-contained image.
+# Only dist/ is mounted for output — no .cache/ needed.
+DOCKER_LINUX_IMAGE ?= goosestation-builder-linux
+DOCKER_LINUX_DOCKERFILE ?= Dockerfile.linux
+DOCKER_WINDOWS_IMAGE ?= goosestation-builder-windows
+DOCKER_WINDOWS_DOCKERFILE ?= Dockerfile.windows
+DOCKER_ANDROID_IMAGE ?= goosestation-builder-android
+DOCKER_ANDROID_DOCKERFILE ?= Dockerfile.android
+DOCKER_SWITCH_IMAGE ?= goosestation-builder-switch
+DOCKER_SWITCH_DOCKERFILE ?= Dockerfile.switch
+DOCKER_MOUNT_DIST := -v "$(CURDIR)/dist:/work/dist:Z"
+DOCKER_RUN_LINUX := docker run --rm $(DOCKER_MOUNT_DIST) $(DOCKER_LINUX_IMAGE)
+DOCKER_RUN_WINDOWS := docker run --rm $(DOCKER_MOUNT_DIST) $(DOCKER_WINDOWS_IMAGE)
+DOCKER_RUN_ANDROID := docker run --rm $(DOCKER_MOUNT_DIST) $(DOCKER_ANDROID_IMAGE)
+DOCKER_RUN_SWITCH := docker run --rm $(DOCKER_MOUNT_DIST) $(DOCKER_SWITCH_IMAGE)
+
+.PHONY: docker-linux-image docker-windows-image docker-android-image docker-switch-image
+.PHONY: docker-linux docker-android docker-windows docker-switch docker-all
+
+docker-linux-image:
+	docker build -t $(DOCKER_LINUX_IMAGE) -f $(DOCKER_LINUX_DOCKERFILE) \
+		--build-arg UPSTREAM_COMMIT=$(UPSTREAM_COMMIT) .
+
+docker-windows-image:
+	docker build -t $(DOCKER_WINDOWS_IMAGE) -f $(DOCKER_WINDOWS_DOCKERFILE) \
+		--build-arg UPSTREAM_COMMIT=$(UPSTREAM_COMMIT) .
+
+docker-android-image:
+	docker build -t $(DOCKER_ANDROID_IMAGE) -f $(DOCKER_ANDROID_DOCKERFILE) \
+		--build-arg UPSTREAM_COMMIT=$(UPSTREAM_COMMIT) \
+		--build-arg ANDROID_NDK_VERSION=$(ANDROID_NDK_VERSION) .
+
+docker-switch-image:
+	docker build -t $(DOCKER_SWITCH_IMAGE) -f $(DOCKER_SWITCH_DOCKERFILE) \
+		--build-arg UPSTREAM_COMMIT=$(UPSTREAM_COMMIT) \
+		--build-arg RETROARCH_COMMIT=$(RETROARCH_COMMIT) .
+
+docker-linux: docker-linux-image
+	@mkdir -p $(DIST_DIR)
+	@$(DOCKER_RUN_LINUX) linux
+
+docker-android: docker-android-image
+	@mkdir -p $(DIST_DIR)
+	@$(DOCKER_RUN_ANDROID) android
+
+docker-windows: docker-windows-image
+	@mkdir -p $(DIST_DIR)
+	@$(DOCKER_RUN_WINDOWS) windows
+
+docker-switch: docker-switch-image
+	@mkdir -p $(DIST_DIR)
+	@$(DOCKER_RUN_SWITCH) switch-retroarch
+
+docker-all: docker-linux docker-android docker-windows docker-switch

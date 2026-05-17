@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Patch: latest → WORKING
+# Patch: 54feef27dab1b105c30ad341e503c399ebb2409d → WORKING
 # M = smart ed (indent→s, del→d, add→a), A = copy file, D = rm
 set -e
 echo 'GOOSIFYING...'
@@ -15,10 +15,6 @@ PATCHEND
 # Rewrite: CMakeLists.txt
 rm -f 'CMakeLists.txt'
 cat > 'CMakeLists.txt' <<'PATCHEND'
-# SPDX-License-Identifier: GPL-2.0-or-later
-# GooseStation libretro top-level CMake. Independent build entry point so that
-# upstream's restrictively-licensed CMakeLists.txt is never modified.
-
 cmake_minimum_required(VERSION 3.19)
 project(goosestation C CXX)
 

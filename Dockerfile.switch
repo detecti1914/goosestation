@@ -2,20 +2,23 @@
 ###
 ### Usage:
 ###   docker build -f Dockerfile.switch -t goosestation-builder-switch .
-###   docker run --rm -v "$PWD/dist:/work/dist:Z" -v "$PWD/.cache:/work/.cache:Z" \
-###       goosestation-builder-switch switch
+###   docker run --rm -v "$PWD/dist:/work/dist:Z" goosestation-builder-switch switch
+###
+### Fully self-contained: devkitA64 toolchain, portlibs, upstream source,
+### and RetroArch tree (for switch-retroarch) are baked in. Only dist/ mounted.
 ###
 ### Base: devkitPro's devkitA64 image (pacman + switch-dev preinstalled).
 ### Adds switch-portlibs (zlib/png/freetype/etc), cmake/ninja, host clang for
 ### codegen tools that run on the build host.
 
 # syntax=docker/dockerfile:1.6
-FROM devkitpro/devkita64:latest
+FROM devkitpro/devkita64:20260219@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282
+
+ARG UPSTREAM_COMMIT=54feef27dab1b105c30ad341e503c399ebb2409d
+ARG RETROARCH_COMMIT=a340c70468
 
 ENV DEBIAN_FRONTEND=noninteractive
-
-ENV CCACHE_DIR=/work/.cache/ccache
-ENV CCACHE_MAXSIZE=5G
+ENV RETROARCH_DIR=/opt/RetroArch
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
@@ -24,7 +27,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get update \
     && apt-get install -y --no-install-recommends eatmydata \
     && eatmydata apt-get install -y --no-install-recommends \
-        ccache \
         cmake \
         ninja-build \
         git \
@@ -102,6 +104,25 @@ RUN git clone --depth 1 https://github.com/pytorch/cpuinfo.git /tmp/cpuinfo \
 RUN mkdir -p /opt/shader-headers \
     && cp -r /usr/include/shaderc /opt/shader-headers/ \
     && cp -r /usr/include/spirv_cross /opt/shader-headers/
+
+# --- Upstream source fetch + goosify ---
+COPY goosify.sh /tmp/goosify.sh
+RUN mkdir -p /work/.cache /work/src \
+    && curl -fsSL "https://github.com/stenzek/duckstation/archive/${UPSTREAM_COMMIT}.tar.gz" \
+        -o /work/.cache/duckstation-${UPSTREAM_COMMIT}.tar.gz \
+    && tar -xzf /work/.cache/duckstation-${UPSTREAM_COMMIT}.tar.gz -C /work/src \
+    && cp /tmp/goosify.sh /work/src/duckstation-${UPSTREAM_COMMIT}/goosify.sh \
+    && cd /work/src/duckstation-${UPSTREAM_COMMIT} && bash goosify.sh \
+    && touch .goosified \
+    && rm /tmp/goosify.sh
+
+# --- RetroArch (clone + patches) ---
+COPY patches/retroarch/ /tmp/retroarch-patches/
+RUN git clone https://github.com/libretro/RetroArch.git ${RETROARCH_DIR} \
+    && cd ${RETROARCH_DIR} \
+    && git checkout ${RETROARCH_COMMIT} \
+    && git apply /tmp/retroarch-patches/*.patch \
+    && rm -rf /tmp/retroarch-patches .git
 
 WORKDIR /work
 COPY . /work
