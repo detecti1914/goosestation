@@ -1,50 +1,63 @@
 # GooseStation Builder
 
 Reproducible builder for the **GooseStation** libretro core. Fetches a pinned
-upstream DuckStation tarball, runs `goosify.sh`, then builds the libretro core for the selected target.
+upstream DuckStation tarball, runs `goosify.sh`, then builds the libretro core
+for the selected target.
 
-Run `make help` for the full target list and the pinned commits this build
-would use.
+Run `make help` for the full target list and pinned commits.
 
-## Prerequisites
+## Targets
 
-### All targets
-- `cmake` ≥ 3.22
-- `curl`, `tar`, `bash`, `ed`
-- GCC or Clang with C++20 support
+| Target | Output | Native | Docker |
+|--------|--------|--------|--------|
+| linux | `.so` (x86_64) | `make linux` | `make docker-linux` |
+| android | `.so` (arm64) | `make android` | `make docker-android` |
+| windows | `.dll` (x86_64) | `make windows` | `make docker-windows` |
+| macos | `.dylib` (host arch) | `make macos` | — |
+| switch | `.nro` (aarch64) | — | `make docker-switch` |
 
-### Linux target
-Runtime/build libs (Arch/aur package names shown; adapt to your distro):
+    make all          # linux + android + windows
+    make clean        # wipe build/ dist/
+    make distclean    # also wipe src/ .cache/
 
-    zstd libjpeg-turbo libpng libwebp
-    cpuinfo-pytorch-git zlib systemd-libs
-    vulkan-headers shaderc spirv-cross
-    libglvnd
+## Native builds
 
-### Android target
-- Android NDK (tested with `28.2.13676358`).
-- NDK auto-detected in this order, first hit wins:
-  1. `ANDROID_NDK` (explicit)
-  2. `ANDROID_NDK_ROOT` or `ANDROID_NDK_HOME` env vars
-  3. highest-versioned `ndk/*` under `$ANDROID_HOME` or `$ANDROID_SDK_ROOT`
-     (falling back to `~/Android/Sdk` and `/opt/android-sdk`)
+Native builds cache downloads and cross-compiled deps in `.cache/`.
 
-  To override: `make android ANDROID_NDK=/path/to/ndk`.
-- First `make android` run cross-compiles all native deps (shaderc,
-  spirv-cross, libpng, etc.) into `.cache/android/deps/`.
+### Prerequisites (all native targets)
+- `cmake` ≥ 3.22, `curl`, `tar`, `bash`, `ed`
+- GCC or Clang with C++20
+
+### Linux
+Build libs (Arch package names): `zstd libjpeg-turbo libpng libwebp
+cpuinfo-pytorch-git zlib systemd-libs vulkan-headers shaderc spirv-cross
+libglvnd`
+
+### Android
+- Android NDK (tested with r29). Auto-detected from `ANDROID_NDK`,
+  `ANDROID_NDK_ROOT`, `ANDROID_NDK_HOME`, or highest version under
+  `$ANDROID_HOME/ndk/`. Override: `make android ANDROID_NDK=/path/to/ndk`.
+- First run cross-compiles deps into `.cache/android/deps/`.
 - Defaults: `ANDROID_ABI=arm64-v8a`, `ANDROID_PLATFORM=android-28`
 
-## Usage
+### Windows
+- Requires `x86_64-w64-mingw32` cross toolchain.
 
-    make linux                              # host Linux .so
-    make android                            # Android arm64 .so
-    make windows                            # Windows x86_64 .dll (mingw cross)
-    make all                                # all three
-    make clean                              # wipe build/ dist/
-    make distclean                          # also wipe src/
+### macOS
+- Requires Xcode command-line tools. Builds universal (x86_64 + arm64).
 
-On success the full path to the produced `.so` is printed on the last line.
+## Docker builds
 
+Per-platform Dockerfiles (`Dockerfile.linux`, `.android`, `.windows`,
+`.switch`) are fully self-contained — all toolchains, deps, and source are
+baked into the image. Only `dist/` is mounted for output. No `.cache/` needed.
+
+    make docker-linux
+    make docker-android
+    make docker-windows
+    make docker-switch    # produces .nro via RetroArch + libnx
+
+Images are rebuilt automatically when pinned commits or Dockerfiles change.
 
 ## License
 
