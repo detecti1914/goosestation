@@ -1755,6 +1755,14 @@ wq
 PATCHEND
 # Modify: src/core/core.cpp
 ed -s 'src/core/core.cpp' <<'PATCHEND'
+759d
+758a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
+706d
+705a
+#if defined(_WIN32) && !defined(__LIBRETRO__)
+.
 337a
 #endif
 .
@@ -13215,7 +13223,25 @@ void LibretroHost::UpdateVariables(bool force)
   }
 
   if (GetVariable("goosestation_resolution_scale", &value))
-    si.SetUIntValue("GPU", "ResolutionScale", static_cast<u32>(std::atoi(value)));
+  {
+    u32 scale = static_cast<u32>(std::atoi(value));
+    if (g_gpu_device && scale > 1)
+    {
+      const u32 max_scale = g_gpu_device->GetMaxTextureSize() / VRAM_WIDTH;
+      if (scale > max_scale)
+      {
+        LibretroLog(RETRO_LOG_WARN,
+                    "[GooseStation] Resolution scale %ux exceeds GPU max texture size (%u) — reset to %ux\n",
+                    scale, g_gpu_device->GetMaxTextureSize(), max_scale);
+        scale = max_scale;
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "%u", scale);
+        retro_variable var = {"goosestation_resolution_scale", buf};
+        s_environment_callback(RETRO_ENVIRONMENT_SET_VARIABLE, &var);
+      }
+    }
+    si.SetUIntValue("GPU", "ResolutionScale", scale);
+  }
 
   if (GetVariable("goosestation_gpu_multisamples", &value))
     si.SetUIntValue("GPU", "Multisamples", static_cast<u32>(std::atoi(value)));
@@ -14676,11 +14702,11 @@ void LibretroHost::PushVulkanHWVideoFrame()
     display_texture = nullptr;
   }
 
-  // Always use the geometry dimensions for the frame size — the display texture
-  // may transiently have native-res dimensions during mode switches. Using
-  // geometry dims avoids thrashing the presentation image (vkDeviceWaitIdle).
-  const u32 frame_width = std::max(1u, s_last_geometry_width);
-  const u32 frame_height = std::max(1u, s_last_geometry_height);
+  // Size the Vulkan presentation image to match the upscaled render, not the
+  // native PSX resolution — otherwise the blit downscales back to 1x and the
+  // resolution scale setting has no visible effect.
+  const u32 frame_width = (display_width > 0) ? display_width : std::max(1u, s_last_geometry_width);
+  const u32 frame_height = (display_height > 0) ? display_height : std::max(1u, s_last_geometry_height);
 
   EnsureVulkanPresentationImage(frame_width, frame_height);
   if (s_vulkan_presentation_image == VK_NULL_HANDLE)
