@@ -2,17 +2,17 @@
 ###
 ### Usage:
 ###   docker build -f Dockerfile.switch -t goosestation-builder-switch .
-###   docker run --rm -v "$PWD/dist:/work/dist:Z" goosestation-builder-switch switch
+###   docker run --rm -v "$PWD/dist:/work/dist:Z" goosestation-builder-switch
 ###
-### Fully self-contained: devkitA64 toolchain, portlibs, upstream source,
-### and RetroArch tree (for switch-retroarch) are baked in. Only dist/ mounted.
+### Everything is built during `docker build`; `docker run` just copies artifacts out.
+### devkitA64 toolchain, portlibs, upstream source, and RetroArch tree are baked in.
 ###
 ### Base: devkitPro's devkitA64 image (pacman + switch-dev preinstalled).
 ### Adds switch-portlibs (zlib/png/freetype/etc), cmake/ninja, host clang for
 ### codegen tools that run on the build host.
 
 # syntax=docker/dockerfile:1.6
-FROM devkitpro/devkita64:20260219@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282
+FROM devkitpro/devkita64:20260219@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282 AS builder
 
 ARG UPSTREAM_COMMIT=3a10c16b10d3dd23155ccd83a3af97c421d3cab1
 ARG RETROARCH_COMMIT=a340c70468
@@ -125,4 +125,9 @@ RUN git clone https://github.com/libretro/RetroArch.git ${RETROARCH_DIR} \
 WORKDIR /work
 COPY . /work
 
-ENTRYPOINT ["make"]
+# --- Build (cached until source, deps, or Makefile change) ---
+RUN make switch-retroarch && mv dist/ /output/
+
+FROM busybox:1.37.0@sha256:1487d0af5f52b4ba31c7e465126ee2123fe3f2305d638e7827681e7cf6c83d5e
+COPY --from=builder /output/ /output/
+ENTRYPOINT ["sh", "-c", "cp -r /output/. /work/dist/"]

@@ -79,13 +79,19 @@ $(TARBALL):
 	@curl -fsSL $(UPSTREAM_URL) -o $@.tmp && mv $@.tmp $@
 
 $(SRC_DIR)/.goosified: $(GOOSIFY)
-	@rm -rf $(SRC_DIR)
-	@mkdir -p $(SRC_ROOT)
-	@echo "==> Extracting upstream from cached tarball..."
-	@tar -xzf $(TARBALL) -C $(SRC_ROOT)
-	@echo "==> Goosifying..."
-	@cp $(GOOSIFY) $(SRC_DIR)/goosify.sh
-	@cd $(SRC_DIR) && bash ./goosify.sh
+	@if [ -f "$@" ]; then \
+		echo "(source already goosified, skipping fetch+patch)"; \
+	else \
+		rm -rf $(SRC_DIR); \
+		mkdir -p $(SRC_ROOT) $(CACHE_DIR); \
+		test -f "$(TARBALL)" || { echo "==> Fetching upstream $(UPSTREAM_COMMIT)..."; \
+			curl -fsSL $(UPSTREAM_URL) -o $(TARBALL).tmp && mv $(TARBALL).tmp $(TARBALL); }; \
+		echo "==> Extracting upstream from cached tarball..."; \
+		tar -xzf $(TARBALL) -C $(SRC_ROOT); \
+		echo "==> Goosifying..."; \
+		cp $(GOOSIFY) $(SRC_DIR)/goosify.sh; \
+		cd $(SRC_DIR) && bash ./goosify.sh; \
+	fi
 	@touch $@
 
 LINUX_DIST_DIR := $(DIST_DIR)/linux-$(HOST_ARCH)
@@ -442,18 +448,18 @@ docker-switch-image:
 
 docker-linux: docker-linux-image
 	@mkdir -p $(DIST_DIR)
-	@$(DOCKER_RUN_LINUX) linux
+	@$(DOCKER_RUN_LINUX)
 
 docker-android: docker-android-image
 	@mkdir -p $(DIST_DIR)
-	@$(DOCKER_RUN_ANDROID) android
+	@$(DOCKER_RUN_ANDROID)
 
 docker-windows: docker-windows-image
 	@mkdir -p $(DIST_DIR)
-	@$(DOCKER_RUN_WINDOWS) windows
+	@$(DOCKER_RUN_WINDOWS)
 
 docker-switch: docker-switch-image
 	@mkdir -p $(DIST_DIR)
-	@$(DOCKER_RUN_SWITCH) switch-retroarch
+	@$(DOCKER_RUN_SWITCH)
 
 docker-all: docker-linux docker-android docker-windows docker-switch

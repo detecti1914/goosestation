@@ -2,10 +2,10 @@
 ###
 ### Usage:
 ###   docker build -f Dockerfile.android -t goosestation-builder-android .
-###   docker run --rm -v "$PWD/dist:/work/dist:Z" goosestation-builder-android android
+###   docker run --rm -v "$PWD/dist:/work/dist:Z" goosestation-builder-android
 ###
-### NDK and cross-compiled deps are baked into the image.
-### Only dist/ is mounted for output. Rebuild image when deps or upstream commit change.
+### Everything is built during `docker build`; `docker run` just copies artifacts out.
+### Rebuild image when deps or upstream commit change.
 ###
 ### Layer ordering (least → most frequent changes):
 ###   1. apt packages
@@ -15,7 +15,7 @@
 ###   5. remaining project files (Makefile, etc.)
 
 # syntax=docker/dockerfile:1.6
-FROM debian:trixie-slim@sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a
+FROM debian:trixie-slim@sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a AS builder
 
 ARG TARGETARCH
 ARG ANDROID_NDK_VERSION=r29
@@ -89,4 +89,9 @@ RUN cd /work/src/duckstation-${UPSTREAM_COMMIT} && bash goosify.sh && touch .goo
 WORKDIR /work
 COPY . /work
 
-ENTRYPOINT ["make"]
+# --- Layer 7: build (cached until source, deps, or Makefile change) ---
+RUN make android && mv dist/ /output/
+
+FROM busybox:1.37.0@sha256:1487d0af5f52b4ba31c7e465126ee2123fe3f2305d638e7827681e7cf6c83d5e
+COPY --from=builder /output/ /output/
+ENTRYPOINT ["sh", "-c", "cp -r /output/. /work/dist/"]
