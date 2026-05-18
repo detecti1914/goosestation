@@ -182,9 +182,6 @@ PATCHEND
 mkdir -p 'CMakeModules'
 # Add: CMakeModules/GooseStationDependencies.cmake
 cat > 'CMakeModules/GooseStationDependencies.cmake' <<'PATCHEND'
-# SPDX-License-Identifier: GPL-2.0-or-later
-# Libretro-only dependency resolution. All libs come from the system, not bundled.
-
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
@@ -11629,8 +11626,27 @@ PATCHEND
 mkdir -p 'src/goosestation-libretro'
 # Add: src/goosestation-libretro/libretro_opengl_context.h
 cat > 'src/goosestation-libretro/libretro_opengl_context.h' <<'PATCHEND'
-// GooseStation — libretro OpenGL context wrapper
-// SPDX-License-Identifier: GPL-2.0-or-later
+/* Copyright (C) 2010-2026 The RetroArch team
+ *
+ * ---------------------------------------------------------------------------------------------
+ * The following license statement only applies to this libretro API header (libretro_deko3d.h)
+ * ---------------------------------------------------------------------------------------------
+ *
+ * Permission is hereby granted, free of charge,
+ * to any person obtaining a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+ * and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
 
 #pragma once
 
@@ -12193,8 +12209,27 @@ PATCHEND
 mkdir -p 'src/goosestation-libretro'
 # Add: src/goosestation-libretro/main.cpp
 cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
-// GooseStation — libretro frontend for DuckStation
-// SPDX-License-Identifier: GPL-2.0-or-later
+/* Copyright (C) 2010-2026 The RetroArch team
+ *
+ * ---------------------------------------------------------------------------------------------
+ * The following license statement only applies to this libretro API header (libretro_deko3d.h)
+ * ---------------------------------------------------------------------------------------------
+ *
+ * Permission is hereby granted, free of charge,
+ * to any person obtaining a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+ * and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
 
 #include "libretro.h"
 
@@ -13568,14 +13603,28 @@ void LibretroHost::PushVideoFrame()
     return;
   }
 
+  const GSVector2i video_size = g_gpu.GetCRTCVideoSize();
+  u32 frame_w = static_cast<u32>(video_size.x);
+  u32 frame_h = static_cast<u32>(video_size.y);
+  if (frame_w == 0 || frame_h == 0)
+  {
+    s_video_refresh_callback(NULL, 320, 240, 320 * sizeof(u32));
+    return;
+  }
+  frame_w = std::min(frame_w, static_cast<u32>(VRAM_WIDTH));
+  frame_h = std::min(frame_h, static_cast<u32>(VRAM_HEIGHT));
+
+  const GSVector4i active_rect = g_gpu.GetCRTCVideoActiveRect();
+  const u32 origin_x = static_cast<u32>(active_rect.x);
+  const u32 origin_y = static_cast<u32>(active_rect.y);
+
   const GSVector4i src_rect = g_gpu.GetCRTCVRAMSourceRect();
   const u32 vram_left = static_cast<u32>(src_rect.x);
   const u32 vram_top = static_cast<u32>(src_rect.y);
-  const u32 vram_right = static_cast<u32>(src_rect.z);
-  const u32 vram_bottom = static_cast<u32>(src_rect.w);
-
-  u32 vram_width = vram_right - vram_left;
-  u32 vram_height = vram_bottom - vram_top;
+  u32 vram_width = static_cast<u32>(src_rect.z) - vram_left;
+  u32 vram_height = static_cast<u32>(src_rect.w) - vram_top;
+  vram_width = std::min(vram_width, static_cast<u32>(VRAM_WIDTH));
+  vram_height = std::min(vram_height, static_cast<u32>(VRAM_HEIGHT));
 
   if (vram_width == 0 || vram_height == 0)
   {
@@ -13583,10 +13632,17 @@ void LibretroHost::PushVideoFrame()
     return;
   }
 
-  vram_width = std::min(vram_width, static_cast<u32>(VRAM_WIDTH));
-  vram_height = std::min(vram_height, static_cast<u32>(VRAM_HEIGHT));
+  const auto [crop_top, crop_bottom] = GetFMVCrop(frame_w, frame_h);
+  const u32 cropped_h = frame_h - crop_top - crop_bottom;
 
-  s_video_framebuffer.resize(static_cast<size_t>(vram_width) * vram_height);
+  s_video_framebuffer.resize(static_cast<size_t>(frame_w) * cropped_h);
+  std::fill(s_video_framebuffer.begin(), s_video_framebuffer.end(), 0xFF000000u);
+
+  const s32 dst_y_offset = static_cast<s32>(origin_y) - static_cast<s32>(crop_top);
+  const u32 y_start = (dst_y_offset < 0) ? static_cast<u32>(-dst_y_offset) : 0;
+  const s32 y_end_s = static_cast<s32>(cropped_h) - dst_y_offset;
+  const u32 y_end = (y_end_s > 0) ? std::min(vram_height, static_cast<u32>(y_end_s)) : 0;
+  const u32 x_end = (origin_x < frame_w) ? std::min(vram_width, frame_w - origin_x) : 0;
 
   const bool is_24bit = g_gpu.IsDisplayAreaColorDepth24();
 
@@ -13595,13 +13651,14 @@ void LibretroHost::PushVideoFrame()
     const u32 src_x_base = g_gpu.GetDisplayAddressStartX();
     const u32 skip_x = vram_left - src_x_base;
 
-    for (u32 y = 0; y < vram_height; y++)
+    for (u32 y = y_start; y < y_end; y++)
     {
+      const u32 dst_y = static_cast<u32>(dst_y_offset + static_cast<s32>(y));
       const u32 src_y = (vram_top + y) & VRAM_HEIGHT_MASK;
       const u16* src_row = &g_vram[src_y * VRAM_WIDTH];
-      u32* dst_row = &s_video_framebuffer[y * vram_width];
+      u32* dst_row = &s_video_framebuffer[dst_y * frame_w + origin_x];
 
-      for (u32 x = 0; x < vram_width; x++)
+      for (u32 x = 0; x < x_end; x++)
       {
         const u32 offset = (src_x_base + (((skip_x + x) * 3) / 2));
         const u16 s0 = src_row[offset % VRAM_WIDTH];
@@ -13619,13 +13676,13 @@ void LibretroHost::PushVideoFrame()
   }
   else
   {
-    // 15-bit BGR555
-    for (u32 y = 0; y < vram_height; y++)
+    for (u32 y = y_start; y < y_end; y++)
     {
+      const u32 dst_y = static_cast<u32>(dst_y_offset + static_cast<s32>(y));
       const u32 src_y = (vram_top + y) & VRAM_HEIGHT_MASK;
-      u32* dst_row = &s_video_framebuffer[y * vram_width];
+      u32* dst_row = &s_video_framebuffer[dst_y * frame_w + origin_x];
 
-      for (u32 x = 0; x < vram_width; x++)
+      for (u32 x = 0; x < x_end; x++)
       {
         const u32 src_x = (vram_left + x) & VRAM_WIDTH_MASK;
         const u16 pixel = g_vram[src_y * VRAM_WIDTH + src_x];
@@ -13639,10 +13696,7 @@ void LibretroHost::PushVideoFrame()
     }
   }
 
-  const auto [crop_top, crop_bottom] = GetFMVCrop(vram_width, vram_height);
-  const u32 cropped_height = vram_height - crop_top - crop_bottom;
-  const u32* frame_data = s_video_framebuffer.data() + (crop_top * vram_width);
-  s_video_refresh_callback(frame_data, vram_width, cropped_height, vram_width * sizeof(u32));
+  s_video_refresh_callback(s_video_framebuffer.data(), frame_w, cropped_h, frame_w * sizeof(u32));
 }
 
 #ifdef __SWITCH__
@@ -13874,49 +13928,33 @@ void LibretroHost::PushDeko3DVideoFrame()
   const u32 src_y = static_cast<u32>(display_rect.y) + crop_top;
   const u32 cropped_height = height - crop_top - crop_bottom;
 
-  // Absorb PSX interlaced-scanline jitter so RA doesn't realloc GL upload
-  // texture. Threshold matches the SET_GEOMETRY filter in retro_run.
-  static u32 s_last_push_w = 0;
-  static u32 s_last_push_h = 0;
-  {
-    const u32 h_delta = cropped_height > s_last_push_h ? cropped_height - s_last_push_h
-                                                       : s_last_push_h - cropped_height;
-    if (width != s_last_push_w || h_delta > 8 || s_last_push_w == 0)
-    {
-      s_last_push_w = width;
-      s_last_push_h = cropped_height;
-    }
-  }
-  const u32 push_w = s_last_push_w;
-  const u32 push_h = s_last_push_h;
-  const u32 push_pitch = push_w * sizeof(u32);
+  const u32 pitch = width * sizeof(u32);
 
-  s_video_framebuffer.resize(static_cast<size_t>(push_w) * push_h);
+  s_video_framebuffer.resize(static_cast<size_t>(width) * cropped_height);
 
   std::unique_ptr<GPUDownloadTexture> dltex;
   if (g_gpu_device->GetFeatures().memory_import)
   {
-    dltex = g_gpu_device->CreateDownloadTexture(push_w, push_h, tex_format, s_video_framebuffer.data(),
-                                                s_video_framebuffer.size() * sizeof(u32), push_pitch);
+    dltex = g_gpu_device->CreateDownloadTexture(width, cropped_height, tex_format, s_video_framebuffer.data(),
+                                                s_video_framebuffer.size() * sizeof(u32), pitch);
   }
   if (!dltex)
-    dltex = g_gpu_device->CreateDownloadTexture(push_w, push_h, tex_format);
+    dltex = g_gpu_device->CreateDownloadTexture(width, cropped_height, tex_format);
   if (!dltex)
   {
-    ERROR_LOG("CreateDownloadTexture failed for {}x{}", push_w, push_h);
-    s_video_refresh_callback(nullptr, push_w, push_h, push_pitch);
+    ERROR_LOG("CreateDownloadTexture failed for {}x{}", width, cropped_height);
+    s_video_refresh_callback(nullptr, width, cropped_height, pitch);
     return;
   }
   dltex->CopyFromTexture(0, 0, display_texture, src_x, src_y, width, cropped_height, 0, 0, !dltex->IsImported());
-  if (!dltex->ReadTexels(0, 0, width, cropped_height, s_video_framebuffer.data(), push_pitch))
+  if (!dltex->ReadTexels(0, 0, width, cropped_height, s_video_framebuffer.data(), pitch))
   {
     ERROR_LOG("ReadTexels failed for {}x{}", width, cropped_height);
-    s_video_refresh_callback(nullptr, push_w, push_h, push_pitch);
+    s_video_refresh_callback(nullptr, width, cropped_height, pitch);
     return;
   }
 
 #ifdef __SWITCH__
-  // RGBA8 GPU storage → XRGB8888 libretro: swap R↔B in uint32.
   {
     u32* pixels = reinterpret_cast<u32*>(s_video_framebuffer.data());
     const u32 count = width * cropped_height;
@@ -13928,7 +13966,7 @@ void LibretroHost::PushDeko3DVideoFrame()
   }
 #endif
 
-  s_video_refresh_callback(s_video_framebuffer.data(), push_w, push_h, push_pitch);
+  s_video_refresh_callback(s_video_framebuffer.data(), width, cropped_height, pitch);
 }
 #endif
 
@@ -14572,7 +14610,7 @@ void LibretroHost::EnsureVulkanPresentationImage(u32 width, u32 height)
 
   VkImageCreateInfo image_ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   image_ci.imageType = VK_IMAGE_TYPE_2D;
-  image_ci.format = VK_FORMAT_R8G8B8A8_UNORM;
+  image_ci.format = VK_FORMAT_B8G8R8A8_UNORM;
   image_ci.extent = {width, height, 1};
   image_ci.mipLevels = 1;
   image_ci.arrayLayers = 1;
@@ -14632,7 +14670,7 @@ void LibretroHost::EnsureVulkanPresentationImage(u32 width, u32 height)
   VkImageViewCreateInfo view_ci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   view_ci.image = s_vulkan_presentation_image;
   view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-  view_ci.format = VK_FORMAT_R8G8B8A8_UNORM;
+  view_ci.format = VK_FORMAT_B8G8R8A8_UNORM;
   view_ci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
   res = vkCreateImageView(s_vulkan_device, &view_ci, nullptr, &s_vulkan_presentation_view);
@@ -14654,7 +14692,7 @@ void LibretroHost::EnsureVulkanPresentationImage(u32 width, u32 height)
   s_vulkan_retro_image.image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   s_vulkan_retro_image.create_info = view_ci;
 
-  LibretroLog(RETRO_LOG_INFO, "[GooseStation] Created Vulkan presentation image %ux%u\n", width, height);
+  LibretroLog(RETRO_LOG_DEBUG, "[GooseStation] Created Vulkan presentation image %ux%u\n", width, height);
 }
 
 void LibretroHost::PushVulkanHWVideoFrame()
@@ -16028,9 +16066,14 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info)
   // truncate to 0.
   if (System::IsValid() && !g_gpu.IsDisplayDisabled())
   {
-    const GSVector4i active_rect = VideoPresenter::GetVideoActiveRect();
-    info->geometry.base_width = static_cast<unsigned>(active_rect.z - active_rect.x);
-    info->geometry.base_height = static_cast<unsigned>(active_rect.w - active_rect.y);
+    const GSVector2i video_size = g_gpu.GetCRTCVideoSize();
+    info->geometry.base_width = static_cast<unsigned>(video_size.x);
+    info->geometry.base_height = static_cast<unsigned>(video_size.y);
+    if (info->geometry.base_width == 0 || info->geometry.base_height == 0)
+    {
+      info->geometry.base_width = 320;
+      info->geometry.base_height = 240;
+    }
   }
   else
   {
@@ -16148,63 +16191,20 @@ RETRO_API void retro_run(void)
   const bool display_disabled_after = g_gpu.IsDisplayDisabled();
 
   {
-    // SET_GEOMETRY base dims are PSX-native for HW direct present (upscale is
-    // baked into the HW image and reported separately via set_image extents);
-    // SW readback path uses real buffer dims since the buffer IS the frame.
+    // Use the stable CRT raster dimensions (video_size) rather than the
+    // jittering VRAM content rect. video_size is derived from crop-mode
+    // visible bounds (fixed constants in Overscan/None modes) and only
+    // changes on real mode switches, not per-frame GP1(05h) shake.
     u32 content_w, content_h;
     if (!display_disabled_after)
     {
-      if (LibretroHost::s_hw_render_enabled)
+      const GSVector2i video_size = g_gpu.GetCRTCVideoSize();
+      content_w = static_cast<u32>(video_size.x);
+      content_h = static_cast<u32>(video_size.y);
+      if (content_w == 0 || content_h == 0)
       {
-        // HW renderers read from VideoPresenter's snapshot — SET_GEOMETRY must
-        // use the same snapshot the HW push will read.
-        const GSVector4i active_rect = VideoPresenter::GetVideoActiveRect();
-        content_w = static_cast<u32>(active_rect.z - active_rect.x);
-        content_h = static_cast<u32>(active_rect.w - active_rect.y);
-      }
-      else
-      {
-#ifndef __SWITCH__
-        // Software pushes the VRAM source rect verbatim — SET_GEOMETRY must
-        // match those exact dims or RA reinterprets the buffer width.
-        const GSVector4i vsrc = g_gpu.GetCRTCVRAMSourceRect();
-        u32 vw = static_cast<u32>(vsrc.z - vsrc.x);
-        u32 vh = static_cast<u32>(vsrc.w - vsrc.y);
-        if (vw == 0 || vh == 0)
-        {
-          vw = 320;
-          vh = 240;
-        }
-        content_w = std::min(vw, static_cast<u32>(VRAM_WIDTH));
-        content_h = std::min(vh, static_cast<u32>(VRAM_HEIGHT));
-#else
-        if (g_gpu_device && g_gpu_device->GetRenderAPI() == RenderAPI::Deko3D)
-        {
-          // Same source as PushDeko3DVideoFrame so SET_GEOMETRY and push
-          // always agree. Filter below absorbs PSX scanline jitter.
-          const GSVector4i r = VideoPresenter::GetDisplayTextureRect();
-          content_w = static_cast<u32>(r.z - r.x);
-          content_h = static_cast<u32>(r.w - r.y);
-          if (content_w == 0 || content_h == 0)
-          {
-            content_w = 320;
-            content_h = 240;
-          }
-        }
-        else
-        {
-          const GSVector4i vsrc = g_gpu.GetCRTCVRAMSourceRect();
-          u32 vw = static_cast<u32>(vsrc.z - vsrc.x);
-          u32 vh = static_cast<u32>(vsrc.w - vsrc.y);
-          if (vw == 0 || vh == 0)
-          {
-            vw = 320;
-            vh = 240;
-          }
-          content_w = std::min(vw, static_cast<u32>(VRAM_WIDTH));
-          content_h = std::min(vh, static_cast<u32>(VRAM_HEIGHT));
-        }
-#endif
+        content_w = 320;
+        content_h = 240;
       }
     }
     else
@@ -16216,19 +16216,8 @@ RETRO_API void retro_run(void)
     const u32 cropped_h = content_h - crop_top - crop_bottom;
     const float ar = GetDisplayAspectRatioFloat(content_w, cropped_h);
 
-    // Filter out CRTC scanline jitter: the PSX display height fluctuates by
-    // a few lines frame-to-frame due to timing of GP1(05h) vs vblank. A CRT
-    // absorbs this in overscan; on a digital display it causes needless
-    // SET_GEOMETRY churn. Only update when width changes or height shifts by
-    // more than 8 native lines (significant mode switch, not jitter).
-    const u32 height_delta = (cropped_h > LibretroHost::s_last_geometry_height)
-      ? (cropped_h - LibretroHost::s_last_geometry_height)
-      : (LibretroHost::s_last_geometry_height - cropped_h);
-    // Threshold in native PSX lines (base dims are native after the HW-direct
-    // present rework). 8 lines is well below any real mode change.
-    const u32 height_threshold = 8;
     const bool geometry_changed = content_w != LibretroHost::s_last_geometry_width ||
-                                  height_delta > height_threshold ||
+                                  cropped_h != LibretroHost::s_last_geometry_height ||
                                   ar != LibretroHost::s_last_aspect_ratio;
     if (geometry_changed)
     {
