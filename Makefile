@@ -15,7 +15,7 @@ BUILD_ROOT := $(ROOT)/build
 DIST_DIR := $(ROOT)/dist
 
 ANDROID_NDK_VERSION ?= r29
-RETROARCH_COMMIT ?= a340c70468
+RETROARCH_BRANCH ?= deko3d-driver
 NDK_HOST_ARCH := $(shell uname -m)
 ifeq ($(NDK_HOST_ARCH),$(filter $(NDK_HOST_ARCH),aarch64 arm64))
 ANDROID_NDK_ARCHIVE := $(CACHE_DIR)/android-ndk-$(ANDROID_NDK_VERSION)-linux-aarch64.tar.gz
@@ -377,16 +377,9 @@ $(SWITCH_RA_NRO): $(SWITCH_LIB)
 	@test -d $(RETROARCH_DIR) || { echo "ERROR: $(RETROARCH_DIR) missing — run update-build.sh switch to seed and patch it"; exit 1; }
 	@echo "==> Staging core archive as libretro_libnx.a"
 	@cp $(SWITCH_LIB) $(RETROARCH_DIR)/libretro_libnx.a
-	@# Force ELF relink: clock skew on bind-mounted .cache/ confuses make's
-	@# mtime check, so it skips relink even when libretro_libnx.a changes.
-	@# Also force dynamic_dummy.o recompile: CFLAGS changes (HAVE_STATIC_DUMMY=)
-	@# are invisible to make's mtime-based dependency tracking.
+	@# Force ELF relink
 	@rm -f $(RETROARCH_DIR)/retroarch_switch.elf $(RETROARCH_DIR)/retroarch_switch.nro \
 	       $(RETROARCH_DIR)/cores/dynamic_dummy.o
-	@# Goose-specific overrides are committed on goose/switch-bundle in the
-	@# RetroArch tree (libs, goose_excpt.o in OFILES, 7zCrc ODR fix).
-	@# The only runtime step is copying goose_excpt.o from the cmake build
-	@# tree — it's a build artifact so it can't be a committed file.
 	@# page_fault_handler.cpp overrides libnx's weak __libnx_exception_entry;
 	@# copying it as a loose .o ensures the strong symbol wins at link time
 	@# even in interpreter-only builds where the archive member isn't pulled.
@@ -399,7 +392,7 @@ $(SWITCH_RA_NRO): $(SWITCH_LIB)
 	@cp $(RETROARCH_DIR)/retroarch_switch.nro $@
 	@cp $(RETROARCH_DIR)/retroarch_switch.elf $(SWITCH_DIST_DIR)/retroarch_switch.elf
 	@echo ""
-	@echo "Switch RetroArch NRO built (per-core, static):"
+	@echo "Switch RetroArch NRO built (static):"
 	@echo "  $@"
 
 clean:
@@ -444,7 +437,7 @@ docker-android-image:
 docker-switch-image:
 	docker build -t $(DOCKER_SWITCH_IMAGE) -f $(DOCKER_SWITCH_DOCKERFILE) \
 		--build-arg UPSTREAM_COMMIT=$(UPSTREAM_COMMIT) \
-		--build-arg RETROARCH_COMMIT=$(RETROARCH_COMMIT) .
+		--build-arg RETROARCH_BRANCH=$(RETROARCH_BRANCH) .
 
 docker-linux: docker-linux-image
 	@mkdir -p $(DIST_DIR)

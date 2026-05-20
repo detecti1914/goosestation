@@ -1,8 +1,8 @@
 diff --git a/Makefile.common b/Makefile.common
-index ccbe1bbe93..350bb40346 100644
+index 6fe17d3df2..2dfe336da1 100644
 --- a/Makefile.common
 +++ b/Makefile.common
-@@ -1991,8 +1991,6 @@ ifeq ($(HAVE_7ZIP),1)
+@@ -1989,8 +1989,6 @@ ifeq ($(HAVE_7ZIP),1)
     DEFINES += -DHAVE_7ZIP -D_7ZIP_ST
     7ZOBJ = $(DEPS_DIR)/7zip/7zArcIn.o \
             $(DEPS_DIR)/7zip/7zBuf.o \

@@ -15,7 +15,7 @@
 FROM devkitpro/devkita64:20260219@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282 AS builder
 
 ARG UPSTREAM_COMMIT=3a10c16b10d3dd23155ccd83a3af97c421d3cab1
-ARG RETROARCH_COMMIT=a340c70468
+ARG RETROARCH_BRANCH=deko3d-driver
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV RETROARCH_DIR=/opt/RetroArch
@@ -116,9 +116,8 @@ RUN cd /work/src/duckstation-${UPSTREAM_COMMIT} && bash goosify.sh && touch .goo
 
 # --- RetroArch (clone + patches) ---
 COPY patches/retroarch/ /tmp/retroarch-patches/
-RUN git clone https://github.com/libretro/RetroArch.git ${RETROARCH_DIR} \
+RUN git clone --depth 1 --branch ${RETROARCH_BRANCH} https://github.com/HueponiK/RetroArch.git ${RETROARCH_DIR} \
     && cd ${RETROARCH_DIR} \
-    && git checkout ${RETROARCH_COMMIT} \
     && git apply /tmp/retroarch-patches/*.patch \
     && rm -rf /tmp/retroarch-patches .git
 
