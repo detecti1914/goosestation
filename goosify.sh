@@ -12716,18 +12716,16 @@ void Host::OnSettingsReloaded()
   static u32 s_last_resolution_scale = 0;
   if (LibretroHost::s_hw_render_enabled && g_settings.gpu_resolution_scale != s_last_resolution_scale)
   {
+    const bool first_set = (s_last_resolution_scale == 0);
     s_last_resolution_scale = g_settings.gpu_resolution_scale;
-    struct retro_system_av_info avi;
-    retro_get_system_av_info(&avi);
-    struct retro_game_geometry geom = {};
-    geom.base_width = avi.geometry.base_width;
-    geom.base_height = avi.geometry.base_height;
-    geom.max_width = avi.geometry.max_width;
-    geom.max_height = avi.geometry.max_height;
-    geom.aspect_ratio = avi.geometry.aspect_ratio;
-    s_environment_callback(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
-    LibretroHost::s_last_geometry_width = avi.geometry.base_width;
-    LibretroHost::s_last_geometry_height = avi.geometry.base_height;
+    if (!first_set)
+    {
+      struct retro_system_av_info avi;
+      retro_get_system_av_info(&avi);
+      s_environment_callback(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avi);
+      LibretroHost::s_last_geometry_width = avi.geometry.base_width;
+      LibretroHost::s_last_geometry_height = avi.geometry.base_height;
+    }
   }
 }
 
@@ -16081,22 +16079,24 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info)
     info->geometry.base_height = 240;
   }
 
-  // RA's gl driver rounds both max_width and max_height to the next power of two and
-  // allocates a square FBO at the larger of the two (confirmed: max=15360x7680 gets a
-  // 16384x16384 FBO). Mali's GL_MAX_TEXTURE_SIZE is 16383, so the biggest POT square
-  // we can fit is 8192 -> scale cap of 8. Asymmetric "-1" tricks don't help because
-  // the POT rounding is per-dimension before the squaring.
+  if (LibretroHost::s_hw_render_enabled)
+  {
 #ifdef __ANDROID__
-  static constexpr unsigned MAX_SCALE = 8;
+    static constexpr unsigned PLATFORM_MAX_SCALE = 8;
 #elif defined(__SWITCH__)
-  // GL/Mesa 20.1 OOMs at >4x (square POT FBO, 16384^2*8B=2GB). Deko3d HW path
-  // has no RA FBO; cap at 8x (8192×4096) instead.
-  const unsigned MAX_SCALE = LibretroHost::s_deko3d_hw_path_enabled ? 8u : 4u;
+    const unsigned PLATFORM_MAX_SCALE = LibretroHost::s_deko3d_hw_path_enabled ? 8u : 4u;
 #else
-  static constexpr unsigned MAX_SCALE = 16;
+    static constexpr unsigned PLATFORM_MAX_SCALE = 16;
 #endif
-  info->geometry.max_width = VRAM_WIDTH * MAX_SCALE;
-  info->geometry.max_height = VRAM_HEIGHT * MAX_SCALE;
+    const unsigned scale = std::min(std::max(static_cast<unsigned>(g_settings.gpu_resolution_scale), 1u), PLATFORM_MAX_SCALE);
+    info->geometry.max_width = VRAM_WIDTH * scale;
+    info->geometry.max_height = VRAM_HEIGHT * scale;
+  }
+  else
+  {
+    info->geometry.max_width = VRAM_WIDTH;
+    info->geometry.max_height = VRAM_HEIGHT;
+  }
   info->geometry.aspect_ratio =
     GetDisplayAspectRatioFloat(info->geometry.base_width, info->geometry.base_height);
   info->timing.fps = System::IsValid() ? static_cast<double>(System::GetVideoFrameRate())
@@ -16225,16 +16225,13 @@ RETRO_API void retro_run(void)
       LibretroHost::s_last_geometry_height = cropped_h;
       LibretroHost::s_last_aspect_ratio = ar;
 
+      struct retro_system_av_info avi;
+      retro_get_system_av_info(&avi);
       struct retro_game_geometry geom = {};
       geom.base_width = content_w;
       geom.base_height = cropped_h;
-#ifdef __ANDROID__
-      geom.max_width = VRAM_WIDTH * 8;
-      geom.max_height = VRAM_HEIGHT * 8;
-#else
-      geom.max_width = VRAM_WIDTH * 16;
-      geom.max_height = VRAM_HEIGHT * 16;
-#endif
+      geom.max_width = avi.geometry.max_width;
+      geom.max_height = avi.geometry.max_height;
       geom.aspect_ratio = ar;
       s_environment_callback(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
     }
