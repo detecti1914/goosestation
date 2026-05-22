@@ -329,11 +329,13 @@ SWITCH_DIST_DIR := $(DIST_DIR)/switch
 SWITCH_BUILT := $(BUILD_ROOT)/switch/src/goosestation-libretro/goosestation_libretro.a
 SWITCH_LIB := $(SWITCH_DIST_DIR)/libgoosestation_libretro.a
 DEVKITPRO ?= /opt/devkitpro
+SHADER_HEADERS ?= $(if $(wildcard /opt/shader-headers),/opt/shader-headers,$(DEVKITPRO)/shader-headers)
 
 switch: $(SWITCH_LIB)
 
 $(SWITCH_LIB): prepare
-	@test -f $(DEVKITPRO)/cmake/Switch.cmake || { echo "ERROR: $(DEVKITPRO)/cmake/Switch.cmake not found — run inside goosestation-builder-switch image"; exit 1; }
+	@test -f $(DEVKITPRO)/cmake/Switch.cmake || { echo "ERROR: $(DEVKITPRO)/cmake/Switch.cmake not found — install devkitPro or run inside the Docker image"; exit 1; }
+	@test -d $(SHADER_HEADERS)/shaderc || { echo "ERROR: shader headers not found at $(SHADER_HEADERS) — run setup.sh or check SHADER_HEADERS"; exit 1; }
 	@echo "==> Configuring Switch build"
 	@$(CMAKE) -S $(SRC_DIR) -B $(BUILD_ROOT)/switch \
 		-DCMAKE_TOOLCHAIN_FILE=$(DEVKITPRO)/cmake/Switch.cmake \
@@ -346,8 +348,8 @@ $(SWITCH_LIB): prepare
 		-DBUILD_SHARED_LIBS=OFF \
 		-DCMAKE_MODULE_PATH=$(SRC_DIR)/cmake \
 		-DCMAKE_CXX_FLAGS="-Wno-invalid-offsetof -flax-vector-conversions" \
-		-DSHADERC_INCLUDE_DIR=/opt/shader-headers \
-		-DSPIRV_CROSS_INCLUDE_DIR=/opt/shader-headers/spirv_cross \
+		-DSHADERC_INCLUDE_DIR=$(SHADER_HEADERS) \
+		-DSPIRV_CROSS_INCLUDE_DIR=$(SHADER_HEADERS)/spirv_cross \
 		-Wno-dev
 	@echo "==> Building"
 	@$(CMAKE) --build $(BUILD_ROOT)/switch --parallel $(JOBS) --target goosestation_libretro
@@ -373,7 +375,7 @@ SWITCH_RA_NRO    := $(SWITCH_DIST_DIR)/goosestation_libretro_libnx.nro
 switch-retroarch: $(SWITCH_RA_NRO)
 
 $(SWITCH_RA_NRO): $(SWITCH_LIB)
-	@test -f $(DEVKITPRO)/cmake/Switch.cmake || { echo "ERROR: $(DEVKITPRO)/cmake/Switch.cmake not found — run inside goosestation-builder-switch image"; exit 1; }
+	@test -f $(DEVKITPRO)/cmake/Switch.cmake || { echo "ERROR: $(DEVKITPRO)/cmake/Switch.cmake not found — install devkitPro or run inside the Docker image"; exit 1; }
 	@test -d $(RETROARCH_DIR) || { echo "ERROR: $(RETROARCH_DIR) missing — run update-build.sh switch to seed and patch it"; exit 1; }
 	@echo "==> Staging core archive as libretro_libnx.a"
 	@cp $(SWITCH_LIB) $(RETROARCH_DIR)/libretro_libnx.a
