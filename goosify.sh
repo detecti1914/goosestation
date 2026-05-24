@@ -1732,6 +1732,97 @@ wq
 PATCHEND
 # Modify: src/core/cheats.cpp
 ed -s 'src/core/cheats.cpp' <<'PATCHEND'
+4570a
+
+void Cheats::SetLibretroCheat(unsigned index, bool enabled, const char* code_string)
+{
+  // RA sends hex tokens separated by '+': "801FE4AC+0100" for a single
+  // instruction, "801FE4AC+0100+801FE4D2+0100" for two.  The parser
+  // expects "XXXXXXXX YYYYYYYY" per line, so pair consecutive tokens.
+  std::string body;
+  std::string_view remaining(code_string);
+  bool need_space = false;
+  while (!remaining.empty())
+  {
+    const auto pos = remaining.find('+');
+    const std::string_view token = remaining.substr(0, pos);
+    remaining = (pos != std::string_view::npos) ? remaining.substr(pos + 1) : std::string_view();
+
+    if (!token.empty())
+    {
+      if (need_space)
+        body += ' ';
+      else if (!body.empty())
+        body += '\n';
+      body += token;
+      need_space = !need_space;
+    }
+  }
+
+  CheatCode::Metadata metadata;
+  metadata.name = fmt::format("Libretro Cheat {}", index);
+  metadata.type = CodeType::Gameshark;
+  metadata.activation = CodeActivation::EndFrame;
+  metadata.has_options = false;
+  metadata.disable_widescreen_rendering = false;
+  metadata.enable_8mb_ram = false;
+  metadata.disallow_for_achievements = false;
+
+  Error error;
+  std::unique_ptr<CheatCode> parsed = ParseCode(std::move(metadata), body, &error);
+  if (!parsed)
+  {
+    WARNING_LOG("Failed to parse libretro cheat {}: {}", index, error.GetDescription());
+    return;
+  }
+
+  INFO_LOG("Libretro cheat {} {}", index, enabled ? "enabled" : "disabled");
+  s_locals.libretro_cheats[index] = {std::move(parsed), enabled};
+}
+
+void Cheats::ClearLibretroCheats()
+{
+  if (!s_locals.libretro_cheats.empty())
+  {
+    INFO_LOG("Clearing {} libretro cheats", s_locals.libretro_cheats.size());
+    s_locals.libretro_cheats.clear();
+  }
+}
+.
+1213a
+  }
+  for (const auto& [index, cheat] : s_locals.libretro_cheats)
+  {
+    if (cheat.enabled && cheat.code->HasRestorableOnDisableEffects())
+      cheat.code->Apply();
+.
+1181a
+  for (const auto& [index, cheat] : s_locals.libretro_cheats)
+  {
+    if (cheat.enabled)
+      cheat.code->ApplyOnDisable(&ret);
+  }
+.
+1174a
+
+  for (const auto& [index, cheat] : s_locals.libretro_cheats)
+  {
+    if (cheat.enabled)
+      cheat.code->Apply();
+  }
+.
+1044a
+  s_locals.libretro_cheats.clear();
+.
+267a
+
+  struct LibretroCheat
+  {
+    std::unique_ptr<CheatCode> code;
+    bool enabled;
+  };
+  std::map<unsigned, LibretroCheat> libretro_cheats;
+.
 156a
 #else
   ALWAYS_INLINE bool IsOpen() const { return false; }
@@ -1744,9 +1835,21 @@ ed -s 'src/core/cheats.cpp' <<'PATCHEND'
 .
 25a
 #endif
+
+#include <algorithm>
+#include <map>
 .
 24a
 #ifndef __LIBRETRO__
+.
+wq
+PATCHEND
+# Modify: src/core/cheats.h
+ed -s 'src/core/cheats.h' <<'PATCHEND'
+184a
+void SetLibretroCheat(unsigned index, bool enabled, const char* code);
+void ClearLibretroCheats();
+
 .
 wq
 PATCHEND
@@ -12235,6 +12338,7 @@ cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
 
 #include "core/achievements.h"
 #include "core/bus.h"
+#include "core/cheats.h"
 #include "core/controller.h"
 #include "core/core.h"
 #include "core/core_private.h"
@@ -12714,10 +12818,18 @@ void Host::CommitBaseSettingChanges()
 void Host::OnSettingsReloaded()
 {
   static u32 s_last_resolution_scale = 0;
-  if (LibretroHost::s_hw_render_enabled && g_settings.gpu_resolution_scale != s_last_resolution_scale)
+  static GPUDownsampleMode s_last_downsample_mode = GPUDownsampleMode::Disabled;
+  static u8 s_last_downsample_scale = 1;
+
+  if (LibretroHost::s_hw_render_enabled &&
+      (g_settings.gpu_resolution_scale != s_last_resolution_scale ||
+       g_settings.gpu_downsample_mode != s_last_downsample_mode ||
+       g_settings.gpu_downsample_scale != s_last_downsample_scale))
   {
     const bool first_set = (s_last_resolution_scale == 0);
     s_last_resolution_scale = g_settings.gpu_resolution_scale;
+    s_last_downsample_mode = g_settings.gpu_downsample_mode;
+    s_last_downsample_scale = g_settings.gpu_downsample_scale;
     if (!first_set)
     {
       struct retro_system_av_info avi;
@@ -13768,7 +13880,7 @@ void RETRO_CALLCONV LibretroHost::Deko3DHWContextReset()
       s_hw_context_valid = false;
       return;
     }
-    if (System::HasMediaSubImages())
+    if (!s_deferred_boot_path.empty() && System::HasMediaSubImages())
     {
       s_disk_control.has_sub_images = true;
       s_disk_control.image_index = System::GetMediaSubImageIndex();
@@ -14161,7 +14273,7 @@ void RETRO_CALLCONV LibretroHost::HWContextReset()
       return;
     }
 
-    if (System::HasMediaSubImages())
+    if (!s_deferred_boot_path.empty() && System::HasMediaSubImages())
     {
       s_disk_control.has_sub_images = true;
       s_disk_control.image_index = System::GetMediaSubImageIndex();
@@ -14498,7 +14610,7 @@ void RETRO_CALLCONV LibretroHost::VulkanHWContextReset()
       s_hw_context_valid = false;
       return;
     }
-    if (System::HasMediaSubImages())
+    if (!s_deferred_boot_path.empty() && System::HasMediaSubImages())
     {
       s_disk_control.has_sub_images = true;
       s_disk_control.image_index = System::GetMediaSubImageIndex();
@@ -14953,6 +15065,9 @@ void LibretroHost::PushHWVideoFrame()
 RETRO_API void retro_set_environment(retro_environment_t cb)
 {
   s_environment_callback = cb;
+
+  bool support_no_game = true;
+  cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &support_no_game);
 
   // Get log callback
   retro_log_callback log_cb;
@@ -16088,7 +16203,14 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info)
 #else
     static constexpr unsigned PLATFORM_MAX_SCALE = 16;
 #endif
-    const unsigned scale = std::min(std::max(static_cast<unsigned>(g_settings.gpu_resolution_scale), 1u), PLATFORM_MAX_SCALE);
+    unsigned scale = std::min(std::max(static_cast<unsigned>(g_settings.gpu_resolution_scale), 1u), PLATFORM_MAX_SCALE);
+    if (g_settings.gpu_downsample_mode != GPUDownsampleMode::Disabled)
+    {
+      unsigned ds = std::min(scale, static_cast<unsigned>(g_settings.gpu_downsample_scale));
+      while (ds > 1 && (scale % ds) != 0)
+        ds--;
+      scale = ds;
+    }
     info->geometry.max_width = VRAM_WIDTH * scale;
     info->geometry.max_height = VRAM_HEIGHT * scale;
   }
@@ -16268,8 +16390,10 @@ RETRO_API void retro_run(void)
 
 RETRO_API bool retro_load_game(const struct retro_game_info* game)
 {
-  if (!game || !game->path || !LibretroHost::s_core_initialized)
+  if (!LibretroHost::s_core_initialized)
     return false;
+
+  const char* game_path = (game && game->path) ? game->path : nullptr;
 
   // Set pixel format
   enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
@@ -16291,7 +16415,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game)
       if (LibretroHost::SetupHWRender())
       {
         LibretroHost::s_deferred_boot_pending = true;
-        LibretroHost::s_deferred_boot_path = game->path;
+        LibretroHost::s_deferred_boot_path = game_path ? game_path : "";
         LibretroLog(RETRO_LOG_INFO, "[GooseStation] HW render: deferring boot until context_reset\n");
         return true;
       }
@@ -16310,7 +16434,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game)
       if (LibretroHost::SetupVulkanHWRender())
       {
         LibretroHost::s_deferred_boot_pending = true;
-        LibretroHost::s_deferred_boot_path = game->path;
+        LibretroHost::s_deferred_boot_path = game_path ? game_path : "";
         LibretroLog(RETRO_LOG_INFO, "[GooseStation] Vulkan HW render: deferring boot until context_reset\n");
         return true;
       }
@@ -16329,7 +16453,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game)
       if (LibretroHost::SetupDeko3DHWRender())
       {
         LibretroHost::s_deferred_boot_pending = true;
-        LibretroHost::s_deferred_boot_path    = game->path;
+        LibretroHost::s_deferred_boot_path    = game_path ? game_path : "";
         LibretroLog(RETRO_LOG_INFO, "[GooseStation] Deko3D HW render: deferring boot until context_reset\n");
         return true;
       }
@@ -16341,7 +16465,8 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game)
   LibretroHost::UpdateVariables(true);
 
   SystemBootParameters params;
-  params.path = game->path;
+  if (game_path)
+    params.path = game_path;
 
   Error error;
   if (!System::BootSystem(std::move(params), &error))
@@ -16350,28 +16475,37 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game)
     return false;
   }
 
-  if (System::HasMediaSubImages())
+  if (game_path)
   {
-    LibretroHost::s_disk_control.has_sub_images = true;
-    LibretroHost::s_disk_control.image_index = System::GetMediaSubImageIndex();
-    LibretroHost::s_disk_control.image_count = System::GetMediaSubImageCount();
-    LibretroHost::s_disk_control.image_paths.clear();
-    LibretroHost::s_disk_control.image_labels.clear();
-    for (u32 i = 0; i < LibretroHost::s_disk_control.image_count; i++)
+    if (System::HasMediaSubImages())
     {
-      LibretroHost::s_disk_control.image_paths.push_back(game->path); // TODO: get actual sub-image paths
-      LibretroHost::s_disk_control.image_labels.push_back(System::GetMediaSubImageTitle(i));
+      LibretroHost::s_disk_control.has_sub_images = true;
+      LibretroHost::s_disk_control.image_index = System::GetMediaSubImageIndex();
+      LibretroHost::s_disk_control.image_count = System::GetMediaSubImageCount();
+      LibretroHost::s_disk_control.image_paths.clear();
+      LibretroHost::s_disk_control.image_labels.clear();
+      for (u32 i = 0; i < LibretroHost::s_disk_control.image_count; i++)
+      {
+        LibretroHost::s_disk_control.image_paths.push_back(game_path);
+        LibretroHost::s_disk_control.image_labels.push_back(System::GetMediaSubImageTitle(i));
+      }
     }
-
+    else
+    {
+      LibretroHost::s_disk_control.image_index = 0;
+      LibretroHost::s_disk_control.image_count = 1;
+      LibretroHost::s_disk_control.image_paths.clear();
+      LibretroHost::s_disk_control.image_paths.push_back(game_path);
+      LibretroHost::s_disk_control.image_labels.clear();
+      LibretroHost::s_disk_control.image_labels.push_back(std::string(Path::GetFileTitle(game_path)));
+    }
   }
   else
   {
     LibretroHost::s_disk_control.image_index = 0;
-    LibretroHost::s_disk_control.image_count = 1;
+    LibretroHost::s_disk_control.image_count = 0;
     LibretroHost::s_disk_control.image_paths.clear();
-    LibretroHost::s_disk_control.image_paths.push_back(game->path);
     LibretroHost::s_disk_control.image_labels.clear();
-    LibretroHost::s_disk_control.image_labels.push_back(std::string(Path::GetFileTitle(game->path)));
   }
 
   LibretroHost::s_game_loaded = true;
@@ -16380,7 +16514,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game)
 
   LibretroHost::SetInputDescriptors();
 
-  LibretroLog(RETRO_LOG_INFO, "[GooseStation] Game loaded: %s\n", game->path);
+  LibretroLog(RETRO_LOG_INFO, "[GooseStation] %s\n", game_path ? game_path : "BIOS shell (no content)");
   return true;
 }
 
@@ -16490,15 +16624,20 @@ RETRO_API size_t retro_get_memory_size(unsigned id)
 }
 
 // =============================================================================
-// Cheat support (stubs)
+// Cheat support
 // =============================================================================
 
 RETRO_API void retro_cheat_reset(void)
 {
+  LibretroLog(RETRO_LOG_INFO, "[GooseStation] retro_cheat_reset called\n");
+  Cheats::ClearLibretroCheats();
 }
 
 RETRO_API void retro_cheat_set(unsigned index, bool enabled, const char* code)
 {
+  LibretroLog(RETRO_LOG_INFO, "[GooseStation] retro_cheat_set(%u, %s, \"%s\")\n",
+              index, enabled ? "true" : "false", code ? code : "(null)");
+  Cheats::SetLibretroCheat(index, enabled, code);
 }
 PATCHEND
 # Modify: src/util/CMakeLists.txt
@@ -20977,6 +21116,13 @@ ed -s 'src/util/shadergen.cpp' <<'PATCHEND'
 .
 242a
   DefineMacro(ss, "API_DEKO3D", m_render_api == RenderAPI::Deko3D);
+.
+229a
+
+    if (!GLAD_GL_VERSION_4_0 && GLAD_GL_ARB_sample_shading)
+      ss << "#extension GL_ARB_sample_shading : enable\n";
+    if (!GLAD_GL_VERSION_4_0 && GLAD_GL_ARB_gpu_shader5)
+      ss << "#extension GL_ARB_gpu_shader5 : enable\n";
 .
 177a
 #ifdef __SWITCH__

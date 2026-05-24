@@ -329,6 +329,7 @@ SWITCH_DIST_DIR := $(DIST_DIR)/switch
 SWITCH_BUILT := $(BUILD_ROOT)/switch/src/goosestation-libretro/goosestation_libretro.a
 SWITCH_LIB := $(SWITCH_DIST_DIR)/libgoosestation_libretro.a
 DEVKITPRO ?= /opt/devkitpro
+export DEVKITPRO
 SHADER_HEADERS ?= $(if $(wildcard /opt/shader-headers),/opt/shader-headers,$(DEVKITPRO)/shader-headers)
 
 switch: $(SWITCH_LIB)
@@ -376,7 +377,7 @@ switch-retroarch: $(SWITCH_RA_NRO)
 
 $(SWITCH_RA_NRO): $(SWITCH_LIB)
 	@test -f $(DEVKITPRO)/cmake/Switch.cmake || { echo "ERROR: $(DEVKITPRO)/cmake/Switch.cmake not found — install devkitPro or run inside the Docker image"; exit 1; }
-	@test -d $(RETROARCH_DIR) || { echo "ERROR: $(RETROARCH_DIR) missing — run update-build.sh switch to seed and patch it"; exit 1; }
+	@test -d $(RETROARCH_DIR) || { echo "ERROR: $(RETROARCH_DIR) missing — clone RetroArch and apply patches first"; exit 1; }
 	@echo "==> Staging core archive as libretro_libnx.a"
 	@cp $(SWITCH_LIB) $(RETROARCH_DIR)/libretro_libnx.a
 	@# Force ELF relink
