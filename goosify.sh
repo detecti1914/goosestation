@@ -1929,6 +1929,9 @@ ed -s 'src/core/cpu_code_cache.cpp' <<'PATCHEND'
   return PageProtectionMode::ManualCheck;
 #else
 .
+226a
+  PageFaultHandler::Uninstall();
+.
 62d
 61a
 static constexpr u32 RECOMPILER_FAR_CODE_CACHE_SIZE = 8 * 1024 * 1024;
@@ -3477,6 +3480,7 @@ PATCHEND
 # Modify: src/core/video_thread.cpp
 ed -s 'src/core/video_thread.cpp' <<'PATCHEND'
 186,189s/^/  /
+279,281s/^/  /
 1134,1135s/^/  /
 1137,1143s/^/  /
 1148s/^  //
@@ -3556,6 +3560,17 @@ ed -s 'src/core/video_thread.cpp' <<'PATCHEND'
 .
 593a
 #ifndef __LIBRETRO__
+.
+281a
+    }
+.
+278a
+    // Shutdown is a meta-command, not a GPU command. Route it through the FIFO
+    // so the video thread picks it up and exits cleanly. In non-threaded mode the
+    // backend may already be destroyed by the time we shut down the thread, so
+    // dispatching through the backend would crash on a null pointer.
+    if (cmd->type != VideoThreadCommandType::Shutdown)
+    {
 .
 189a
         } while (available_size < size);
@@ -12872,6 +12887,11 @@ void Host::OnSystemStarted()
 
 void Host::OnSystemStopping()
 {
+  // Clear HW render flag BEFORE DestroySystem starts freeing resources.
+  // This prevents OnSettingsReloaded (triggered by ApplySettings during teardown)
+  // from firing SET_SYSTEM_AV_INFO environment callbacks when the backend is gone.
+  LibretroHost::s_hw_render_enabled = false;
+  LibretroHost::s_hw_context_valid = false;
 }
 
 void Host::OnSystemDestroyed()
@@ -20770,6 +20790,24 @@ wq
 PATCHEND
 # Modify: src/util/page_fault_handler.cpp
 ed -s 'src/util/page_fault_handler.cpp' <<'PATCHEND'
+367a
+
+  s_installed = false;
+}
+
+#endif
+.
+366a
+void PageFaultHandler::Uninstall()
+{
+  std::unique_lock lock(s_exception_handler_mutex);
+  if (!s_installed)
+    return;
+
+  sigaction(SIGSEGV, &s_prev_sigsegv_action, nullptr);
+#if defined(__APPLE__) || defined(__aarch64__)
+  sigaction(SIGBUS, &s_prev_sigbus_action, nullptr);
+.
 353d
 352a
   if (sigaction(SIGBUS, &sa, &s_prev_sigbus_action) != 0)
@@ -20814,6 +20852,17 @@ static struct sigaction s_prev_sigbus_action;
 .
 240d
 239a
+void PageFaultHandler::Uninstall()
+{
+  std::unique_lock lock(s_exception_handler_mutex);
+  if (!s_installed)
+    return;
+
+  RemoveVectoredExceptionHandler(s_veh_handle);
+  s_veh_handle = nullptr;
+  s_installed = false;
+}
+
 #elif defined(__SWITCH__)
 
 #include <switch.h>
@@ -21005,7 +21054,20 @@ bool PageFaultHandler::Install(Error* error)
   return true;
 }
 
+void PageFaultHandler::Uninstall()
+{
+  s_installed = false;
+}
+
 #elif (!defined(__ANDROID__) || defined(__LIBRETRO__))
+.
+229,230d
+228a
+  s_veh_handle = AddVectoredExceptionHandler(1, ExceptionHandler);
+  if (!s_veh_handle)
+.
+188a
+static PVOID s_veh_handle = nullptr;
 .
 18d
 17a
@@ -21016,6 +21078,7 @@ PATCHEND
 # Modify: src/util/page_fault_handler.h
 ed -s 'src/util/page_fault_handler.h' <<'PATCHEND'
 17a
+void Uninstall();
 
 .
 wq
