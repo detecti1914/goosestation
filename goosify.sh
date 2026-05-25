@@ -2570,7 +2570,7 @@ ed -s 'src/core/gpu_hw.cpp' <<'PATCHEND'
 3679a
 
 #ifdef __LIBRETRO__
-      SetVRAMRenderTarget();
+    SetVRAMRenderTarget();
     g_gpu_device->SetViewport(m_vram_texture->GetRect());
 #endif
 .
@@ -2697,6 +2697,7 @@ PATCHEND
 truncate -s -1 'src/core/gpu_hw_shadergen.cpp'
 # Modify: src/core/gpu_hw_texture_cache.cpp
 ed -s 'src/core/gpu_hw_texture_cache.cpp' <<'PATCHEND'
+3513s/fals/tru/
 3465,3468d
 3464a
     VERBOSE_LOG("Preloading replacement textures: {} of {}", num_textures_loaded, total_textures);                     \
@@ -12406,6 +12407,8 @@ cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
 #include "util/vulkan_texture.h"
 #endif
 
+#include "util/cd_image.h"
+
 #include "core/analog_controller.h"
 #include "core/digital_controller.h"
 #include "core/save_state_version.h"
@@ -12456,6 +12459,7 @@ namespace LibretroHost {
 static bool s_system_initialized = false;
 static bool s_core_initialized = false;
 static bool s_game_loaded = false;
+static ConsoleRegion s_console_region = ConsoleRegion::NTSC_U;
 static bool s_frame_done = false;
 static bool s_shutdown_requested = false;
 static bool s_supports_input_bitmasks = false;
@@ -12498,6 +12502,7 @@ static u32 s_last_geometry_width = 0;
 static u32 s_last_geometry_height = 0;
 
 static float s_last_aspect_ratio = 4.0f / 3.0f;
+static double s_last_fps = 0.0;
 static bool s_fmv_zoom_16_9 = false;
 
 #ifdef ENABLE_VULKAN
@@ -12562,7 +12567,80 @@ static void DestroyVulkanPresentationImage();
 static void EnsureVulkanPresentationImage(u32 width, u32 height);
 #endif
 
+static float GetHardwareFrameRate()
+{
+  const bool pal = System::IsValid() ? System::IsPALRegion() : (s_console_region == ConsoleRegion::PAL);
+  return static_cast<float>(pal ? 53203425.0 / (3406.0 * 314.0) : 53693175.0 / (3413.0 * 263.0));
+}
+
 } // namespace LibretroHost
+
+static void LibretroLog(retro_log_level level, const char* fmt, ...);
+
+static bool PerformDeferredBoot()
+{
+  LibretroHost::UpdateVariables(true);
+
+  {
+    struct retro_system_av_info pre;
+    retro_get_system_av_info(&pre);
+    LibretroHost::s_last_geometry_width = pre.geometry.base_width;
+    LibretroHost::s_last_geometry_height = pre.geometry.base_height;
+    LibretroHost::s_last_aspect_ratio = pre.geometry.aspect_ratio;
+    LibretroHost::s_last_fps = pre.timing.fps;
+  }
+
+  SystemBootParameters params;
+  params.path = LibretroHost::s_deferred_boot_path;
+
+  Error error;
+  if (!System::BootSystem(std::move(params), &error))
+  {
+    LibretroLog(RETRO_LOG_ERROR, "[GooseStation] BootSystem() failed: %s\n", error.GetDescription().c_str());
+    LibretroHost::s_deferred_boot_pending = false;
+    LibretroHost::s_deferred_boot_path.clear();
+    return false;
+  }
+
+  if (!LibretroHost::s_deferred_boot_path.empty() && System::HasMediaSubImages())
+  {
+    LibretroHost::s_disk_control.has_sub_images = true;
+    LibretroHost::s_disk_control.image_index = System::GetMediaSubImageIndex();
+    LibretroHost::s_disk_control.image_count = System::GetMediaSubImageCount();
+    LibretroHost::s_disk_control.image_paths.clear();
+    LibretroHost::s_disk_control.image_labels.clear();
+    for (u32 i = 0; i < LibretroHost::s_disk_control.image_count; i++)
+    {
+      LibretroHost::s_disk_control.image_paths.push_back(LibretroHost::s_deferred_boot_path);
+      LibretroHost::s_disk_control.image_labels.push_back(System::GetMediaSubImageTitle(i));
+    }
+  }
+
+  LibretroHost::s_deferred_boot_pending = false;
+  LibretroHost::s_deferred_boot_path.clear();
+  LibretroHost::s_game_loaded = true;
+
+  LibretroHost::s_save_state_buffer.resize(System::GetMaxSaveStateSize(g_settings.cpu_enable_8mb_ram));
+
+  {
+    struct retro_system_av_info avi;
+    retro_get_system_av_info(&avi);
+    const bool timing_changed = (avi.timing.fps != LibretroHost::s_last_fps);
+    const bool geometry_changed = (avi.geometry.base_width != LibretroHost::s_last_geometry_width ||
+                                   avi.geometry.base_height != LibretroHost::s_last_geometry_height ||
+                                   avi.geometry.aspect_ratio != LibretroHost::s_last_aspect_ratio);
+    if (timing_changed)
+      s_environment_callback(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avi);
+    else if (geometry_changed)
+      s_environment_callback(RETRO_ENVIRONMENT_SET_GEOMETRY, &avi.geometry);
+    LibretroHost::s_last_geometry_width = avi.geometry.base_width;
+    LibretroHost::s_last_geometry_height = avi.geometry.base_height;
+    LibretroHost::s_last_aspect_ratio = avi.geometry.aspect_ratio;
+    LibretroHost::s_last_fps = avi.timing.fps;
+  }
+
+  return true;
+}
 
 // Computes the AR to report to RetroArch for a content buffer of
 // content_w × content_h pixels. Delegates to upstream's ComputePixelAspectRatio()
@@ -13885,38 +13963,12 @@ void RETRO_CALLCONV LibretroHost::Deko3DHWContextReset()
 
   if (s_deferred_boot_pending)
   {
-    LibretroHost::UpdateVariables(true);
-
-    SystemBootParameters params;
-    params.path = s_deferred_boot_path;
-
-    Error error;
-    if (!System::BootSystem(std::move(params), &error))
+    if (!PerformDeferredBoot())
     {
-      LibretroLog(RETRO_LOG_ERROR, "[GooseStation] BootSystem() failed in Deko3DHWContextReset: %s\n",
-                  error.GetDescription().c_str());
-      s_deferred_boot_pending = false;
-      s_deferred_boot_path.clear();
       s_hw_context_valid = false;
       return;
     }
-    if (!s_deferred_boot_path.empty() && System::HasMediaSubImages())
-    {
-      s_disk_control.has_sub_images = true;
-      s_disk_control.image_index = System::GetMediaSubImageIndex();
-      s_disk_control.image_count = System::GetMediaSubImageCount();
-      s_disk_control.image_paths.clear();
-      s_disk_control.image_labels.clear();
-      for (u32 i = 0; i < s_disk_control.image_count; i++)
-      {
-        s_disk_control.image_paths.push_back(s_deferred_boot_path);
-        s_disk_control.image_labels.push_back(System::GetMediaSubImageTitle(i));
-      }
-    }
 
-    s_deferred_boot_pending = false;
-    s_deferred_boot_path.clear();
-    s_game_loaded = true;
     LibretroLog(RETRO_LOG_INFO, "[GooseStation] Deferred boot completed under shared Deko3D device\n");
   }
 }
@@ -14278,51 +14330,8 @@ void RETRO_CALLCONV LibretroHost::HWContextReset()
 
   if (s_deferred_boot_pending)
   {
-    LibretroHost::UpdateVariables(true);
-
-    SystemBootParameters params;
-    params.path = s_deferred_boot_path;
-
-    Error error;
-    if (!System::BootSystem(std::move(params), &error))
-    {
-      LibretroLog(RETRO_LOG_ERROR, "[GooseStation] BootSystem() failed in HWContextReset: %s\n",
-                  error.GetDescription().c_str());
-      s_deferred_boot_pending = false;
-      s_deferred_boot_path.clear();
+    if (!PerformDeferredBoot())
       return;
-    }
-
-    if (!s_deferred_boot_path.empty() && System::HasMediaSubImages())
-    {
-      s_disk_control.has_sub_images = true;
-      s_disk_control.image_index = System::GetMediaSubImageIndex();
-      s_disk_control.image_count = System::GetMediaSubImageCount();
-      s_disk_control.image_paths.clear();
-      s_disk_control.image_labels.clear();
-      for (u32 i = 0; i < s_disk_control.image_count; i++)
-      {
-        s_disk_control.image_paths.push_back(s_deferred_boot_path);
-        s_disk_control.image_labels.push_back(System::GetMediaSubImageTitle(i));
-      }
-    }
-
-    s_deferred_boot_pending = false;
-    s_deferred_boot_path.clear();
-    s_game_loaded = true;
-
-    s_save_state_buffer.resize(System::GetMaxSaveStateSize(g_settings.cpu_enable_8mb_ram));
-
-    // Update timing now that System is valid — retro_get_system_av_info returned
-    // a default 60/50 Hz before boot; the real NTSC rate is ~59.82 Hz.
-    {
-      struct retro_system_av_info avi;
-      retro_get_system_av_info(&avi);
-      s_environment_callback(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avi);
-      s_last_geometry_width = avi.geometry.base_width;
-      s_last_geometry_height = avi.geometry.base_height;
-      s_last_aspect_ratio = avi.geometry.aspect_ratio;
-    }
 
     CreateDisplayGLResources();
 
@@ -14332,6 +14341,12 @@ void RETRO_CALLCONV LibretroHost::HWContextReset()
   {
     LibretroLog(RETRO_LOG_INFO, "[GooseStation] Recreating GPU backend after GL context loss...\n");
     s_context_lost = false;
+
+    if (System::IsValid())
+    {
+      VideoThread::UpdateGameInfo(System::GetGameTitle(), System::GetGameSerial(),
+                                  System::GetGamePath(), System::GetGameHash());
+    }
 
     CreateDisplayGLResources();
 
@@ -14616,49 +14631,10 @@ void RETRO_CALLCONV LibretroHost::VulkanHWContextReset()
 
   if (s_deferred_boot_pending)
   {
-    LibretroHost::UpdateVariables(true);
-
-    SystemBootParameters params;
-    params.path = s_deferred_boot_path;
-
-    Error error;
-    if (!System::BootSystem(std::move(params), &error))
+    if (!PerformDeferredBoot())
     {
-      LibretroLog(RETRO_LOG_ERROR, "[GooseStation] BootSystem() failed: %s\n", error.GetDescription().c_str());
-      s_deferred_boot_pending = false;
-      s_deferred_boot_path.clear();
       s_hw_context_valid = false;
       return;
-    }
-    if (!s_deferred_boot_path.empty() && System::HasMediaSubImages())
-    {
-      s_disk_control.has_sub_images = true;
-      s_disk_control.image_index = System::GetMediaSubImageIndex();
-      s_disk_control.image_count = System::GetMediaSubImageCount();
-      s_disk_control.image_paths.clear();
-      s_disk_control.image_labels.clear();
-      for (u32 i = 0; i < s_disk_control.image_count; i++)
-      {
-        s_disk_control.image_paths.push_back(s_deferred_boot_path);
-        s_disk_control.image_labels.push_back(System::GetMediaSubImageTitle(i));
-      }
-    }
-
-    s_deferred_boot_pending = false;
-    s_deferred_boot_path.clear();
-    s_game_loaded = true;
-
-    s_save_state_buffer.resize(System::GetMaxSaveStateSize(g_settings.cpu_enable_8mb_ram));
-
-    // Update timing now that System is valid — retro_get_system_av_info returned
-    // a default 60/50 Hz before boot; the real NTSC rate is ~59.82 Hz.
-    {
-      struct retro_system_av_info avi;
-      retro_get_system_av_info(&avi);
-      s_environment_callback(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avi);
-      s_last_geometry_width = avi.geometry.base_width;
-      s_last_geometry_height = avi.geometry.base_height;
-      s_last_aspect_ratio = avi.geometry.aspect_ratio;
     }
 
     LibretroLog(RETRO_LOG_INFO, "[GooseStation] Vulkan HW render: game booted successfully\n");
@@ -14667,6 +14643,14 @@ void RETRO_CALLCONV LibretroHost::VulkanHWContextReset()
   {
     LibretroLog(RETRO_LOG_INFO, "[GooseStation] Recreating GPU backend after context loss...\n");
     s_context_lost = false;
+
+    // Context destroy cleared the video thread's game info; restore it before
+    // backend creation so texture cache dump/replacement paths have the serial.
+    if (System::IsValid())
+    {
+      VideoThread::UpdateGameInfo(System::GetGameTitle(), System::GetGameSerial(),
+                                  System::GetGamePath(), System::GetGameHash());
+    }
 
     Error error;
     if (!VideoThread::CreateGPUBackend(g_settings.gpu_renderer, true, std::nullopt, &error))
@@ -16211,7 +16195,9 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info)
   else
   {
     info->geometry.base_width = 320;
-    info->geometry.base_height = 240;
+    info->geometry.base_height = (LibretroHost::s_console_region == ConsoleRegion::PAL)
+                                   ? (GPU::PAL_VERTICAL_ACTIVE_END - GPU::PAL_VERTICAL_ACTIVE_START)
+                                   : (GPU::NTSC_VERTICAL_ACTIVE_END - GPU::NTSC_VERTICAL_ACTIVE_START);
   }
 
   if (LibretroHost::s_hw_render_enabled)
@@ -16241,10 +16227,9 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info)
   }
   info->geometry.aspect_ratio =
     GetDisplayAspectRatioFloat(info->geometry.base_width, info->geometry.base_height);
-  info->timing.fps = System::IsValid() ? static_cast<double>(System::GetVideoFrameRate())
-                                       : (System::IsPALRegion() ? 50.0 : 60.0);
+  info->timing.fps = static_cast<double>(System::IsValid() ? System::GetVideoFrameRate()
+                                                            : LibretroHost::GetHardwareFrameRate());
   info->timing.sample_rate = 44100.0;
-
 }
 
 RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device)
@@ -16414,6 +16399,26 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game)
     return false;
 
   const char* game_path = (game && game->path) ? game->path : nullptr;
+
+  if (game_path)
+  {
+    const char* region_value = nullptr;
+    GetVariable("goosestation_region", &region_value);
+    const bool auto_region = !region_value || std::strcmp(region_value, "Auto") == 0;
+    if (!auto_region)
+    {
+      LibretroHost::s_console_region = Settings::ParseConsoleRegionName(region_value).value_or(ConsoleRegion::NTSC_U);
+    }
+    else
+    {
+      Error error;
+      auto cdi = CDImage::Open(game_path, false, &error);
+      if (cdi)
+        LibretroHost::s_console_region = System::GetConsoleRegionForDiscRegion(System::GetRegionForImage(cdi.get()));
+      else
+        LibretroHost::s_console_region = ConsoleRegion::NTSC_U;
+    }
+  }
 
   // Set pixel format
   enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
