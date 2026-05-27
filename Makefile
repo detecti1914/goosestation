@@ -128,6 +128,7 @@ $(LINUX_UNSTRIPPED): prepare $(LINUX_DEPS_DIR)/.deps-ready
 	@mkdir -p $(LINUX_DIST_DIR)
 	@cp $(LINUX_BUILT) $@
 	@cp $(ROOT)/goosestation_libretro.info $(LINUX_DIST_DIR)/goosestation_libretro.info
+	@cp $(SRC_DIR)/src/goosestation-libretro/overlays/cursor_only.cfg $(LINUX_DIST_DIR)/cursor_only.cfg
 	@echo ""
 	@echo "Linux core built (unstripped):"
 	@echo "  $@"
@@ -170,6 +171,7 @@ $(ANDROID_UNSTRIPPED): prepare $(ANDROID_DEPS_DIR)/.deps-ready $(ANDROID_NDK)/.n
 	@mkdir -p $(DIST_DIR)/android
 	@cp $(ANDROID_BUILT) $@
 	@cp $(ROOT)/goosestation_libretro.info $(DIST_DIR)/android/goosestation_libretro.info
+	@cp $(SRC_DIR)/src/goosestation-libretro/overlays/cursor_only.cfg $(DIST_DIR)/android/cursor_only.cfg
 	@echo ""
 	@echo "Android core built (unstripped):"
 	@echo "  $@"
@@ -261,6 +263,7 @@ $(WINDOWS_UNSTRIPPED): prepare $(MINGW_DEPS_DIR)/.deps-ready
 	@mkdir -p $(DIST_DIR)/windows
 	@cp $(WINDOWS_BUILT) $@
 	@cp $(ROOT)/goosestation_libretro.info $(DIST_DIR)/windows/goosestation_libretro.info
+	@cp $(SRC_DIR)/src/goosestation-libretro/overlays/cursor_only.cfg $(DIST_DIR)/windows/cursor_only.cfg
 	@echo ""
 	@echo "Windows core built (unstripped):"
 	@echo "  $@"
@@ -309,6 +312,7 @@ $(MACOS_UNSTRIPPED): prepare $(MACOS_DEPS_DIR)/.deps-ready
 	@mkdir -p $(MACOS_DIST_DIR)
 	@cp $(MACOS_BUILT) $@
 	@cp $(ROOT)/goosestation_libretro.info $(MACOS_DIST_DIR)/goosestation_libretro.info
+	@cp $(SRC_DIR)/src/goosestation-libretro/overlays/cursor_only.cfg $(MACOS_DIST_DIR)/cursor_only.cfg
 	@echo ""
 	@echo "macOS core built (unstripped):"
 	@echo "  $@"
@@ -365,6 +369,7 @@ $(SWITCH_LIB): prepare
 	} | $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-ar -M
 	@mv $@.tmp $@
 	@cp $(ROOT)/goosestation_libretro.info $(SWITCH_DIST_DIR)/goosestation_libretro.info
+	@cp $(ROOT)/cursor_only.cfg $(SWITCH_DIST_DIR)/cursor_only.cfg
 	@echo ""
 	@echo "Switch core built (static archive):"
 	@echo "  $@"
