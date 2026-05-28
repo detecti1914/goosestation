@@ -14,10 +14,10 @@ systemid = "playstation"
 
 # Libretro Features
 database = "Sony - PlayStation"
-display_version = "0.3"
-supports_no_game = "false"
+display_version = "4.0"
+supports_no_game = "true"
 hw_render = "true"
-required_hw_api = "OpenGL Core >= 3.3 | Vulkan >= 1.0"
+required_hw_api = "OpenGL Core >= 3.3 | Vulkan >= 1.0 | Deko3D"
 is_experimental = "true"
 savestate = "true"
 savestate_features = "serialized"
