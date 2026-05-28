@@ -28,7 +28,7 @@ jobs:
           # 这样无论你选择哪一个工具链版本，都能完美兼容你死锁的 3a10c16b 旧源码。
           docker build -t goosestation-builder-android -f Dockerfile.android \
             --build-arg UPSTREAM_COMMIT=3a10c16b10d3dd23155ccd83a3af97c421d3cab1 \
-            --build-arg ANDROID_NDK_VERSION=r29 \
+            --build-arg ANDROID_NDK_VERSION=r29 .
 
       - name: Extract Build Output
         run: |
