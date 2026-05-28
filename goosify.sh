@@ -13103,6 +13103,10 @@ static std::string s_deferred_boot_path;
 static int s_analog_toggle_combo = 0;
 static bool s_analog_combo_active[NUM_CONTROLLER_AND_CARD_PORTS] = {};
 static bool s_context_lost = false;
+static bool (*s_update_options_display)() = nullptr;
+static int16_t s_mouse_pointer_x[NUM_CONTROLLER_AND_CARD_PORTS] = {};
+static int16_t s_mouse_pointer_y[NUM_CONTROLLER_AND_CARD_PORTS] = {};
+static bool s_mouse_pointer_active[NUM_CONTROLLER_AND_CARD_PORTS] = {};
 #ifdef __SWITCH__
 static bool s_deko3d_hw_path_enabled = false;
 static const retro_hw_render_interface_deko3d* s_deko3d_iface = nullptr;
@@ -13988,6 +13992,8 @@ void LibretroHost::SetInputDescriptors()
     {
       s_input_descriptors_storage.push_back({port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT, "Left Button"});
       s_input_descriptors_storage.push_back({port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_RIGHT, "Right Button"});
+      s_input_descriptors_storage.push_back({port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A, "Left Button (Touch)"});
+      s_input_descriptors_storage.push_back({port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B, "Right Button (Touch)"});
       continue;
     }
 
@@ -14129,8 +14135,12 @@ void LibretroHost::UpdateControllers()
       const bool ms_middle = s_input_state_callback(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_MIDDLE) != 0;
       const bool jp_a = s_input_state_callback(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A) != 0;
       const bool jp_b = s_input_state_callback(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B) != 0;
+      const bool lg_trigger = s_input_state_callback(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_TRIGGER) != 0;
+      const bool lg_reload = s_input_state_callback(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_RELOAD) != 0;
+      const bool lg_aux_a = s_input_state_callback(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_AUX_A) != 0;
+      const bool lg_aux_b = s_input_state_callback(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_AUX_B) != 0;
 
-      bool trigger = false, shoot_offscreen = false, btn_a = jp_a, btn_b = jp_b;
+      bool trigger = lg_trigger, shoot_offscreen = lg_reload, btn_a = jp_a || lg_aux_a, btn_b = jp_b || lg_aux_b;
       auto apply_guncon = [&](LightgunMouseAction action, bool pressed) {
         if (!pressed) return;
         switch (action) {
@@ -14166,11 +14176,14 @@ void LibretroHost::UpdateControllers()
       const bool ms_left = s_input_state_callback(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT) != 0;
       const bool ms_right = s_input_state_callback(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_RIGHT) != 0;
       const bool ms_middle = s_input_state_callback(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_MIDDLE) != 0;
-
       const bool jp_start = s_input_state_callback(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START) != 0;
       const bool jp_back = s_input_state_callback(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT) != 0;
+      const bool lg_trigger = s_input_state_callback(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_TRIGGER) != 0;
+      const bool lg_reload = s_input_state_callback(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_RELOAD) != 0;
+      const bool lg_start = s_input_state_callback(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_START) != 0;
+      const bool lg_select = s_input_state_callback(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_SELECT) != 0;
 
-      bool trigger = false, shoot_offscreen = false, start = jp_start, back = jp_back;
+      bool trigger = lg_trigger, shoot_offscreen = lg_reload, start = jp_start || lg_start, back = jp_back || lg_select;
       auto apply_justifier = [&](LightgunMouseAction action, bool pressed) {
         if (!pressed) return;
         switch (action) {
@@ -14203,13 +14216,33 @@ void LibretroHost::UpdateControllers()
 
     if (type == ControllerType::PlayStationMouse)
     {
-      controller->SetBindState(static_cast<u32>(PlayStationMouse::Binding::Left),
-                               s_input_state_callback(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT) ? 1.0f : 0.0f);
-      controller->SetBindState(static_cast<u32>(PlayStationMouse::Binding::Right),
-                               s_input_state_callback(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_RIGHT) ? 1.0f : 0.0f);
+      bool left = s_input_state_callback(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT) != 0;
+      bool right = s_input_state_callback(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_RIGHT) != 0;
+      int16_t dx = s_input_state_callback(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X);
+      int16_t dy = s_input_state_callback(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_Y);
 
-      const int16_t dx = s_input_state_callback(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X);
-      const int16_t dy = s_input_state_callback(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_Y);
+      if (dx == 0 && dy == 0 && !left && !right)
+      {
+        const bool pressed = s_input_state_callback(port, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_PRESSED) != 0;
+        if (pressed)
+        {
+          const int16_t px = s_input_state_callback(port, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
+          const int16_t py = s_input_state_callback(port, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
+          if (s_mouse_pointer_active[port])
+          {
+            dx = static_cast<int16_t>((px - s_mouse_pointer_x[port]) / 128);
+            dy = static_cast<int16_t>((py - s_mouse_pointer_y[port]) / 128);
+          }
+          s_mouse_pointer_x[port] = px;
+          s_mouse_pointer_y[port] = py;
+        }
+        s_mouse_pointer_active[port] = pressed;
+        left = s_input_state_callback(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A) != 0;
+        right = s_input_state_callback(port, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B) != 0;
+      }
+
+      controller->SetBindState(static_cast<u32>(PlayStationMouse::Binding::Left), left ? 1.0f : 0.0f);
+      controller->SetBindState(static_cast<u32>(PlayStationMouse::Binding::Right), right ? 1.0f : 0.0f);
       controller->SetBindState(static_cast<u32>(PlayStationMouse::Binding::PointerX), static_cast<float>(dx));
       controller->SetBindState(static_cast<u32>(PlayStationMouse::Binding::PointerY), static_cast<float>(dy));
 
@@ -14991,7 +15024,11 @@ void LibretroHost::UpdateVariables(bool force)
   }
 
   if (pad_type_changed)
+  {
     SetInputDescriptors();
+    if (s_update_options_display)
+      s_update_options_display();
+  }
 }
 
 void LibretroHost::PushVideoFrame()
@@ -16287,15 +16324,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     {"pgxp", "PGXP", "Precision geometry transform pipeline settings."},
     {"display", "Display", "Aspect ratio, cropping, and display adjustments."},
     {"audio", "Audio", "Audio output settings."},
-    {"input", "Input", "Controller type selection, multitap, and memory cards."},
-    {"input_dualshock", "Input: DualShock", "Analog stick, vibration, and mode settings for the DualShock controller."},
-    {"input_analog_joystick", "Input: Analog Joystick", "Analog stick settings for the Analog Joystick controller."},
-    {"input_negcon", "Input: NeGcon", "Steering and analog axis tuning for the NeGcon controller."},
-    {"input_negcon_rumble", "Input: NeGcon (Rumble)", "Steering and vibration settings for the NeGcon (Rumble) controller."},
-    {"input_lightgun", "Input: Lightgun", "Calibration for GunCon and Justifier. For a crosshair, use a RetroArch overlay with Show Mouse Cursor enabled."},
-    {"input_mouse", "Input: Mouse", "Sensitivity settings for the PlayStation Mouse."},
-    {"input_jogcon", "Input: JogCon", "Analog and steering settings for JogCon."},
-    {"input_ddgo", "Input: DD Go", "Analog and transition settings for Densha de Go! controller."},
+    {"input", "Input", "Controller type selection and per-controller settings."},
     {"cdrom", "CD-ROM", "CD-ROM emulation behavior and speed settings."},
     {"texture_replacements", "Texture Replacements", "Texture replacement, dumping, and caching."},
     {"hacks", "Hacks", "Emulation timing hacks and compatibility tweaks."},
@@ -16809,84 +16838,84 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     {
       "goosestation_analog_toggle_combo", "Analog Mode Toggle Combo", "Analog Combo",
       "Button combo to toggle between digital and analog mode on DualShock controllers.",
-      nullptr, "input_dualshock",
+      nullptr, "input",
       {{"disabled", "Disabled"}, {"l1+r1+select", "L1 + R1 + Select"}, {"l1+r1+start", "L1 + R1 + Start"}, {"l1+r1+l3", "L1 + R1 + L3"}, {"l1+r1+r3", "L1 + R1 + R3"}, {"l2+r2+select", "L2 + R2 + Select"}, {"l2+r2+start", "L2 + R2 + Start"}, {"l2+r2+l3", "L2 + R2 + L3"}, {"l2+r2+r3", "L2 + R2 + R3"}, {"l3+r3", "L3 + R3"}, {nullptr, nullptr}},
       "disabled"
     },
     {
       "goosestation_analog_force_on_reset", "Force Analog on Reset", "Force Analog",
       "Forces the DualShock controller into analog mode when the game resets. Most games expect analog mode.",
-      nullptr, "input_dualshock",
+      nullptr, "input",
       {{"true", "Enabled"}, {"false", "Disabled"}, {nullptr, nullptr}},
       "true"
     },
     {
       "goosestation_analog_dpad_in_digital", "D-Pad on Left Stick in Digital Mode", "D-Pad on Stick",
       "Allows the left analog stick to control the D-Pad when the controller is in digital mode.",
-      nullptr, "input_dualshock",
+      nullptr, "input",
       {{"true", "Enabled"}, {"false", "Disabled"}, {nullptr, nullptr}},
       "true"
     },
     {
       "goosestation_analog_shoulder_buttons", "Right Stick to Shoulder Buttons", "R-Stick Shoulders",
       "Maps the right analog stick to shoulder buttons (L1/R1).",
-      nullptr, "input_dualshock",
+      nullptr, "input",
       {{"0", "Never"}, {"1", "Digital Mode Only"}, {"2", "Always"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_analog_trigger_buttons", "Right Stick to Trigger Buttons", "R-Stick Triggers",
       "Maps the right analog stick to trigger buttons (L2/R2).",
-      nullptr, "input_dualshock",
+      nullptr, "input",
       {{"0", "Never"}, {"1", "Digital Mode Only"}, {"2", "Always"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_dualshock_deadzone", "Analog Stick Deadzone", "Stick Deadzone",
       "Sets the analog stick deadzone, i.e. the fraction of the stick movement which will be ignored.",
-      nullptr, "input_dualshock",
+      nullptr, "input",
       {{"0", "0%"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {"30", "30%"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_dualshock_sensitivity", "Analog Stick Sensitivity", "Stick Sensitivity",
       "Sets the analog stick axis scaling factor. 130-140% recommended for modern controllers (DualShock 4, Xbox).",
-      nullptr, "input_dualshock",
+      nullptr, "input",
       {{"50", "50%"}, {"60", "60%"}, {"70", "70%"}, {"80", "80%"}, {"90", "90%"}, {"100", "100%"}, {"110", "110%"}, {"120", "120%"}, {"130", "130%"}, {"133", "133%"}, {"140", "140%"}, {"150", "150%"}, {"160", "160%"}, {"170", "170%"}, {"180", "180%"}, {"190", "190%"}, {"200", "200%"}, {nullptr, nullptr}},
       "133"
     },
     {
       "goosestation_dualshock_button_deadzone", "Button/Trigger Deadzone", "Trigger Deadzone",
       "Sets the deadzone for activating buttons/triggers via analog input.",
-      nullptr, "input_dualshock",
+      nullptr, "input",
       {{"1", "1%"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {"30", "30%"}, {"40", "40%"}, {"50", "50%"}, {nullptr, nullptr}},
       "25"
     },
     {
       "goosestation_dualshock_invert_left", "Invert Left Stick", "Invert L-Stick",
       "Inverts the direction of the left analog stick.",
-      nullptr, "input_dualshock",
+      nullptr, "input",
       {{"0", "Not Inverted"}, {"1", "Invert Left/Right"}, {"2", "Invert Up/Down"}, {"3", "Invert Both"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_dualshock_invert_right", "Invert Right Stick", "Invert R-Stick",
       "Inverts the direction of the right analog stick.",
-      nullptr, "input_dualshock",
+      nullptr, "input",
       {{"0", "Not Inverted"}, {"1", "Invert Left/Right"}, {"2", "Invert Up/Down"}, {"3", "Invert Both"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_dualshock_vibration_large", "Large Motor Vibration Bias", "Large Vibration",
       "Bias value for the large vibration motor. Increase if vibration feels too weak.",
-      nullptr, "input_dualshock",
+      nullptr, "input",
       {{"-128", "-128"}, {"-64", "-64"}, {"-32", "-32"}, {"0", "0"}, {"8", "8"}, {"16", "16"}, {"32", "32"}, {"64", "64"}, {"128", "128"}, {"255", "255"}, {nullptr, nullptr}},
       "8"
     },
     {
       "goosestation_dualshock_vibration_small", "Small Motor Vibration Bias", "Small Vibration",
       "Bias value for the small vibration motor. Increase if vibration feels too weak.",
-      nullptr, "input_dualshock",
+      nullptr, "input",
       {{"-128", "-128"}, {"-64", "-64"}, {"-32", "-32"}, {"0", "0"}, {"8", "8"}, {"16", "16"}, {"32", "32"}, {"64", "64"}, {"128", "128"}, {"255", "255"}, {nullptr, nullptr}},
       "8"
     },
@@ -16897,28 +16926,28 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     {
       "goosestation_analogjoystick_deadzone", "Analog Stick Deadzone", "Stick Deadzone",
       "Sets the analog stick deadzone, i.e. the fraction of the stick movement which will be ignored.",
-      nullptr, "input_analog_joystick",
+      nullptr, "input",
       {{"0", "0%"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {"30", "30%"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_analogjoystick_sensitivity", "Analog Stick Sensitivity", "Stick Sensitivity",
       "Sets the analog stick axis scaling factor. 130-140% recommended for modern controllers (DualShock 4, Xbox).",
-      nullptr, "input_analog_joystick",
+      nullptr, "input",
       {{"50", "50%"}, {"60", "60%"}, {"70", "70%"}, {"80", "80%"}, {"90", "90%"}, {"100", "100%"}, {"110", "110%"}, {"120", "120%"}, {"130", "130%"}, {"133", "133%"}, {"140", "140%"}, {"150", "150%"}, {"160", "160%"}, {"170", "170%"}, {"180", "180%"}, {"190", "190%"}, {"200", "200%"}, {nullptr, nullptr}},
       "133"
     },
     {
       "goosestation_analogjoystick_invert_left", "Invert Left Stick", "Invert L-Stick",
       "Inverts the direction of the left analog stick.",
-      nullptr, "input_analog_joystick",
+      nullptr, "input",
       {{"0", "Not Inverted"}, {"1", "Invert Left/Right"}, {"2", "Invert Up/Down"}, {"3", "Invert Both"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_analogjoystick_invert_right", "Invert Right Stick", "Invert R-Stick",
       "Inverts the direction of the right analog stick.",
-      nullptr, "input_analog_joystick",
+      nullptr, "input",
       {{"0", "Not Inverted"}, {"1", "Invert Left/Right"}, {"2", "Invert Up/Down"}, {"3", "Invert Both"}, {nullptr, nullptr}},
       "0"
     },
@@ -16929,112 +16958,112 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     {
       "goosestation_negcon_steering_deadzone", "Steering Deadzone", "Steering DZ",
       "Sets the deadzone for the steering (twist) axis.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"0", "0%"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {"30", "30%"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_negcon_steering_saturation", "Steering Saturation", "Steering Sat",
       "Sets the saturation for the steering (twist) axis.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"50", "50%"}, {"60", "60%"}, {"70", "70%"}, {"80", "80%"}, {"90", "90%"}, {"100", "100%"}, {"110", "110%"}, {"120", "120%"}, {"130", "130%"}, {"140", "140%"}, {"150", "150%"}, {"200", "200%"}, {nullptr, nullptr}},
       "100"
     },
     {
       "goosestation_negcon_steering_linearity", "Steering Linearity", "Steering Lin",
       "Sets the linearity curve for the steering axis. 0 = linear, positive = more center precision, negative = more edge precision. NeGcon only (not Rumble).",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"-200", "-2.00"}, {"-150", "-1.50"}, {"-100", "-1.00"}, {"-50", "-0.50"}, {"0", "0 (Linear)"}, {"50", "0.50"}, {"100", "1.00"}, {"150", "1.50"}, {"200", "2.00"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_negcon_steering_scaling", "Steering Scaling", "Steering Scale",
       "Multiplier applied to the steering axis output. NeGcon only (not Rumble).",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"50", "50%"}, {"75", "75%"}, {"100", "100%"}, {"125", "125%"}, {"150", "150%"}, {"200", "200%"}, {"300", "300%"}, {"500", "500%"}, {"1000", "1000%"}, {nullptr, nullptr}},
       "100"
     },
     {
       "goosestation_negcon_i_deadzone", "I Button Deadzone", "I DZ",
       "Sets the deadzone for the I analog button. NeGcon only (not Rumble).",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"0", "0%"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {"30", "30%"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_negcon_i_saturation", "I Button Saturation", "I Sat",
       "Sets the saturation for the I analog button.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"50", "50%"}, {"60", "60%"}, {"70", "70%"}, {"80", "80%"}, {"90", "90%"}, {"100", "100%"}, {nullptr, nullptr}},
       "100"
     },
     {
       "goosestation_negcon_i_linearity", "I Button Linearity", "I Lin",
       "Sets the linearity curve for the I analog button.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"-200", "-2.00"}, {"-100", "-1.00"}, {"0", "0 (Linear)"}, {"100", "1.00"}, {"200", "2.00"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_negcon_i_scaling", "I Button Scaling", "I Scale",
       "Multiplier applied to the I analog button output.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"50", "50%"}, {"75", "75%"}, {"100", "100%"}, {"125", "125%"}, {"150", "150%"}, {"200", "200%"}, {"500", "500%"}, {"1000", "1000%"}, {nullptr, nullptr}},
       "100"
     },
     {
       "goosestation_negcon_ii_deadzone", "II Button Deadzone", "II DZ",
       "Sets the deadzone for the II analog button.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"0", "0%"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {"30", "30%"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_negcon_ii_saturation", "II Button Saturation", "II Sat",
       "Sets the saturation for the II analog button.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"50", "50%"}, {"60", "60%"}, {"70", "70%"}, {"80", "80%"}, {"90", "90%"}, {"100", "100%"}, {nullptr, nullptr}},
       "100"
     },
     {
       "goosestation_negcon_ii_linearity", "II Button Linearity", "II Lin",
       "Sets the linearity curve for the II analog button.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"-200", "-2.00"}, {"-100", "-1.00"}, {"0", "0 (Linear)"}, {"100", "1.00"}, {"200", "2.00"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_negcon_ii_scaling", "II Button Scaling", "II Scale",
       "Multiplier applied to the II analog button output.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"50", "50%"}, {"75", "75%"}, {"100", "100%"}, {"125", "125%"}, {"150", "150%"}, {"200", "200%"}, {"500", "500%"}, {"1000", "1000%"}, {nullptr, nullptr}},
       "100"
     },
     {
       "goosestation_negcon_l_deadzone", "Left Trigger Deadzone", "L DZ",
       "Sets the deadzone for the left trigger.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"0", "0%"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {"30", "30%"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_negcon_l_saturation", "Left Trigger Saturation", "L Sat",
       "Sets the saturation for the left trigger.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"50", "50%"}, {"60", "60%"}, {"70", "70%"}, {"80", "80%"}, {"90", "90%"}, {"100", "100%"}, {nullptr, nullptr}},
       "100"
     },
     {
       "goosestation_negcon_l_linearity", "Left Trigger Linearity", "L Lin",
       "Sets the linearity curve for the left trigger.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"-200", "-2.00"}, {"-100", "-1.00"}, {"0", "0 (Linear)"}, {"100", "1.00"}, {"200", "2.00"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_negcon_l_scaling", "Left Trigger Scaling", "L Scale",
       "Multiplier applied to the left trigger output.",
-      nullptr, "input_negcon",
+      nullptr, "input",
       {{"50", "50%"}, {"75", "75%"}, {"100", "100%"}, {"125", "125%"}, {"150", "150%"}, {"200", "200%"}, {"500", "500%"}, {"1000", "1000%"}, {nullptr, nullptr}},
       "100"
     },
@@ -17044,28 +17073,28 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     {
       "goosestation_negconrumble_steering_deadzone", "Steering Deadzone", "Steering DZ",
       "Sets the deadzone for the steering (twist) axis.",
-      nullptr, "input_negcon_rumble",
+      nullptr, "input",
       {{"0", "0%"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {"30", "30%"}, {nullptr, nullptr}},
       "10"
     },
     {
       "goosestation_negconrumble_steering_sensitivity", "Steering Sensitivity", "Steering Sens",
       "Sets the sensitivity multiplier for the steering (twist) axis.",
-      nullptr, "input_negcon_rumble",
+      nullptr, "input",
       {{"50", "50%"}, {"60", "60%"}, {"70", "70%"}, {"80", "80%"}, {"90", "90%"}, {"100", "100%"}, {"110", "110%"}, {"120", "120%"}, {"130", "130%"}, {"140", "140%"}, {"150", "150%"}, {"200", "200%"}, {nullptr, nullptr}},
       "100"
     },
     {
       "goosestation_negconrumble_vibration_large", "Large Motor Vibration Bias", "Large Vibration",
       "Bias value for the large vibration motor. Increase if vibration feels too weak.",
-      nullptr, "input_negcon_rumble",
+      nullptr, "input",
       {{"-128", "-128"}, {"-64", "-64"}, {"-32", "-32"}, {"0", "0"}, {"8", "8"}, {"16", "16"}, {"32", "32"}, {"64", "64"}, {"128", "128"}, {"255", "255"}, {nullptr, nullptr}},
       "8"
     },
     {
       "goosestation_negconrumble_vibration_small", "Small Motor Vibration Bias", "Small Vibration",
       "Bias value for the small vibration motor. Increase if vibration feels too weak.",
-      nullptr, "input_negcon_rumble",
+      nullptr, "input",
       {{"-128", "-128"}, {"-64", "-64"}, {"-32", "-32"}, {"0", "0"}, {"8", "8"}, {"16", "16"}, {"32", "32"}, {"64", "64"}, {"128", "128"}, {"255", "255"}, {nullptr, nullptr}},
       "8"
     },
@@ -17076,112 +17105,112 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     {
       "goosestation_guncon_x_scale", "GunCon: X Scale", "GunCon X Scale",
       "Scales GunCon X coordinates relative to the center of the screen. Adjust if the cursor drifts left/right.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"80", "80%"}, {"85", "85%"}, {"90", "90%"}, {"95", "95%"}, {"100", "100%"}, {"105", "105%"}, {"110", "110%"}, {"115", "115%"}, {"120", "120%"}, {nullptr, nullptr}},
       "100"
     },
     {
       "goosestation_guncon_line_offset", "GunCon: Line Offset", "GunCon V-Offset",
       "Vertical offset applied to GunCon position. Adjust if shots consistently land above/below the target.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"-20", "-20"}, {"-15", "-15"}, {"-10", "-10"}, {"-5", "-5"}, {"0", "0"}, {"5", "5"}, {"10", "10"}, {"15", "15"}, {"20", "20"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_guncon_tick_offset", "GunCon: Tick Offset", "GunCon H-Offset",
       "Horizontal offset applied to GunCon position. Adjust if shots consistently land left/right of the target.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"-200", "-200"}, {"-100", "-100"}, {"-50", "-50"}, {"0", "0"}, {"50", "50"}, {"100", "100"}, {"140", "140"}, {"200", "200"}, {"300", "300"}, {nullptr, nullptr}},
       "140"
     },
     {
       "goosestation_guncon_left_click", "GunCon: Left Click", "GunCon L-Click",
       "GunCon action assigned to the left mouse button.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"Trigger", "Trigger"}, {"ShootOffscreen", "Shoot Offscreen (Reload)"}, {"A", "Button A"}, {"B", "Button B"}, {"None", "None"}, {nullptr, nullptr}},
       "Trigger"
     },
     {
       "goosestation_guncon_right_click", "GunCon: Right Click", "GunCon R-Click",
       "GunCon action assigned to the right mouse button.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"A", "Button A"}, {"Trigger", "Trigger"}, {"ShootOffscreen", "Shoot Offscreen (Reload)"}, {"B", "Button B"}, {"None", "None"}, {nullptr, nullptr}},
       "A"
     },
     {
       "goosestation_guncon_middle_click", "GunCon: Middle Click", "GunCon M-Click",
       "GunCon action assigned to the middle mouse button.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"ShootOffscreen", "Shoot Offscreen (Reload)"}, {"Trigger", "Trigger"}, {"A", "Button A"}, {"B", "Button B"}, {"None", "None"}, {nullptr, nullptr}},
       "ShootOffscreen"
     },
     {
       "goosestation_justifier_x_scale", "Justifier: X Scale", "Justifier X Scale",
       "Scales Justifier X coordinates relative to the center of the screen.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"80", "80%"}, {"85", "85%"}, {"90", "90%"}, {"95", "95%"}, {"100", "100%"}, {"105", "105%"}, {"110", "110%"}, {"115", "115%"}, {"120", "120%"}, {nullptr, nullptr}},
       "100"
     },
     {
       "goosestation_justifier_first_line", "Justifier: Line Start Offset", "Just. V-Start",
       "Vertical offset for the first scanline the Justifier can trigger on.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"-30", "-30"}, {"-20", "-20"}, {"-14", "-14"}, {"-10", "-10"}, {"-5", "-5"}, {"0", "0"}, {"5", "5"}, {"10", "10"}, {nullptr, nullptr}},
       "-14"
     },
     {
       "goosestation_justifier_last_line", "Justifier: Line End Offset", "Just. V-End",
       "Vertical offset for the last scanline the Justifier can trigger on.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"-20", "-20"}, {"-15", "-15"}, {"-10", "-10"}, {"-8", "-8"}, {"-5", "-5"}, {"0", "0"}, {"5", "5"}, {"10", "10"}, {nullptr, nullptr}},
       "-8"
     },
     {
       "goosestation_justifier_tick_offset", "Justifier: Tick Offset", "Just. H-Offset",
       "Horizontal offset applied to Justifier position.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"-200", "-200"}, {"-100", "-100"}, {"-50", "-50"}, {"0", "0"}, {"50", "50"}, {"100", "100"}, {"200", "200"}, {"300", "300"}, {nullptr, nullptr}},
       "50"
     },
     {
       "goosestation_justifier_oob_frames", "Justifier: Off-Screen Out-of-Bounds Frames", "Just. OOB",
       "Frames the Justifier is pointed out-of-bounds for an off-screen shot.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"1", "1"}, {"3", "3"}, {"5", "5"}, {"8", "8"}, {"10", "10"}, {"15", "15"}, {"20", "20"}, {nullptr, nullptr}},
       "5"
     },
     {
       "goosestation_justifier_trigger_frames", "Justifier: Off-Screen Trigger Frames", "Just. Trigger",
       "Frames the trigger is held for an off-screen shot.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"1", "1"}, {"3", "3"}, {"5", "5"}, {"8", "8"}, {"10", "10"}, {"15", "15"}, {"20", "20"}, {nullptr, nullptr}},
       "5"
     },
     {
       "goosestation_justifier_release_frames", "Justifier: Off-Screen Release Frames", "Just. Release",
       "Frames the Justifier is pointed out-of-bounds after the trigger is released, for an off-screen shot.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"1", "1"}, {"3", "3"}, {"5", "5"}, {"8", "8"}, {"10", "10"}, {"15", "15"}, {"20", "20"}, {nullptr, nullptr}},
       "5"
     },
     {
       "goosestation_justifier_left_click", "Justifier: Left Click", "Just. L-Click",
       "Justifier action assigned to the left mouse button.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"Trigger", "Trigger"}, {"ShootOffscreen", "Shoot Offscreen (Reload)"}, {"Start", "Start"}, {"Back", "Back"}, {"None", "None"}, {nullptr, nullptr}},
       "Trigger"
     },
     {
       "goosestation_justifier_right_click", "Justifier: Right Click", "Just. R-Click",
       "Justifier action assigned to the right mouse button.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"ShootOffscreen", "Shoot Offscreen (Reload)"}, {"Trigger", "Trigger"}, {"Start", "Start"}, {"Back", "Back"}, {"None", "None"}, {nullptr, nullptr}},
       "ShootOffscreen"
     },
     {
       "goosestation_justifier_middle_click", "Justifier: Middle Click", "Just. M-Click",
       "Justifier action assigned to the middle mouse button.",
-      nullptr, "input_lightgun",
+      nullptr, "input",
       {{"ShootOffscreen", "Shoot Offscreen (Reload)"}, {"Trigger", "Trigger"}, {"Start", "Start"}, {"Back", "Back"}, {"None", "None"}, {nullptr, nullptr}},
       "None"
     },
@@ -17192,14 +17221,14 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     {
       "goosestation_mouse_sensitivity_x", "Horizontal Sensitivity", "H-Sensitivity",
       "Adjusts the horizontal correspondence between physical and virtual mouse movement. 100% matches the original hardware.",
-      nullptr, "input_mouse",
+      nullptr, "input",
       {{"10", "10%"}, {"20", "20%"}, {"30", "30%"}, {"40", "40%"}, {"50", "50%"}, {"60", "60%"}, {"70", "70%"}, {"80", "80%"}, {"90", "90%"}, {"100", "100%"}, {"110", "110%"}, {"120", "120%"}, {"130", "130%"}, {"140", "140%"}, {"150", "150%"}, {"160", "160%"}, {"170", "170%"}, {"180", "180%"}, {"190", "190%"}, {"200", "200%"}, {nullptr, nullptr}},
       "100"
     },
     {
       "goosestation_mouse_sensitivity_y", "Vertical Sensitivity", "V-Sensitivity",
       "Adjusts the vertical correspondence between physical and virtual mouse movement. 100% matches the original hardware.",
-      nullptr, "input_mouse",
+      nullptr, "input",
       {{"10", "10%"}, {"20", "20%"}, {"30", "30%"}, {"40", "40%"}, {"50", "50%"}, {"60", "60%"}, {"70", "70%"}, {"80", "80%"}, {"90", "90%"}, {"100", "100%"}, {"110", "110%"}, {"120", "120%"}, {"130", "130%"}, {"140", "140%"}, {"150", "150%"}, {"160", "160%"}, {"170", "170%"}, {"180", "180%"}, {"190", "190%"}, {"200", "200%"}, {nullptr, nullptr}},
       "100"
     },
@@ -17210,28 +17239,28 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     {
       "goosestation_jogcon_deadzone", "Analog Stick Deadzone", "Stick Deadzone",
       "Sets the deadzone for analog stick input on the JogCon.",
-      nullptr, "input_jogcon",
+      nullptr, "input",
       {{"0", "0%"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {"30", "30%"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_jogcon_sensitivity", "Analog Stick Sensitivity", "Stick Sensitivity",
       "Sets the sensitivity multiplier for analog stick input on the JogCon.",
-      nullptr, "input_jogcon",
+      nullptr, "input",
       {{"50", "50%"}, {"75", "75%"}, {"100", "100%"}, {"110", "110%"}, {"120", "120%"}, {"125", "125%"}, {"133", "133%"}, {"140", "140%"}, {"150", "150%"}, {"175", "175%"}, {"200", "200%"}, {nullptr, nullptr}},
       "133"
     },
     {
       "goosestation_jogcon_button_deadzone", "Button/Trigger Deadzone", "Trigger Deadzone",
       "Sets the deadzone for analog face buttons on the JogCon.",
-      nullptr, "input_jogcon",
+      nullptr, "input",
       {{"0", "0%"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {"30", "30%"}, {nullptr, nullptr}},
       "25"
     },
     {
       "goosestation_jogcon_steering_deadzone", "Steering Hold Deadzone", "Steering DZ",
       "Sets the deadzone for holding the JogCon wheel at the current position without triggering an effect.",
-      nullptr, "input_jogcon",
+      nullptr, "input",
       {{"1", "1%"}, {"3", "3%"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {nullptr, nullptr}},
       "3"
     },
@@ -17242,28 +17271,28 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     {
       "goosestation_ddgo_deadzone", "Analog Stick Deadzone", "Stick Deadzone",
       "Sets the deadzone for analog stick input on the DD Go controller.",
-      nullptr, "input_ddgo",
+      nullptr, "input",
       {{"0", "0%"}, {"5", "5%"}, {"10", "10%"}, {"15", "15%"}, {"20", "20%"}, {"25", "25%"}, {"30", "30%"}, {nullptr, nullptr}},
       "0"
     },
     {
       "goosestation_ddgo_sensitivity", "Analog Stick Sensitivity", "Stick Sensitivity",
       "Sets the sensitivity multiplier for analog stick input on the DD Go controller.",
-      nullptr, "input_ddgo",
+      nullptr, "input",
       {{"50", "50%"}, {"75", "75%"}, {"100", "100%"}, {"110", "110%"}, {"120", "120%"}, {"125", "125%"}, {"133", "133%"}, {"140", "140%"}, {"150", "150%"}, {"175", "175%"}, {"200", "200%"}, {nullptr, nullptr}},
       "133"
     },
     {
       "goosestation_ddgo_power_transition", "Power Transition Frames", "Power Trans.",
       "Frames the DD Go controller reports a transitioning state when changing power level.",
-      nullptr, "input_ddgo",
+      nullptr, "input",
       {{"0", "0"}, {"5", "5"}, {"10", "10"}, {"15", "15"}, {"20", "20"}, {"30", "30"}, {nullptr, nullptr}},
       "10"
     },
     {
       "goosestation_ddgo_brake_transition", "Brake Transition Frames", "Brake Trans.",
       "Frames the DD Go controller reports a transitioning state when changing brake level.",
-      nullptr, "input_ddgo",
+      nullptr, "input",
       {{"0", "0"}, {"5", "5"}, {"10", "10"}, {"15", "15"}, {"20", "20"}, {"30", "30"}, {nullptr, nullptr}},
       "10"
     },
@@ -17823,6 +17852,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     return true;
   };
   cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK, &update_display_cb);
+  LibretroHost::s_update_options_display = update_display_cb.callback;
   update_display_cb.callback();
 
   // Set up disk control interface
@@ -18009,7 +18039,7 @@ RETRO_API void retro_get_system_info(struct retro_system_info* info)
 {
   std::memset(info, 0, sizeof(*info));
   info->library_name = "GooseStation";
-  info->library_version = "0.3 (" __DATE__ " " __TIME__ ")";
+  info->library_version = "4.0 (" __DATE__ " " __TIME__ ")";
   info->valid_extensions = "cue|bin|img|mdf|chd|pbp|iso|m3u|exe|psf|psxexe";
   info->need_fullpath = true;
   info->block_extract = true;
