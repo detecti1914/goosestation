@@ -394,6 +394,231 @@ set_target_properties(zstd::libzstd_shared PROPERTIES
 )
 mark_as_advanced(zstd_LIBRARY)
 PATCHEND
+mkdir -p 'cmake'
+# Add: cmake/generate_gamedb.py
+cat > 'cmake/generate_gamedb.py' <<'PATCHEND'
+#!/usr/bin/env python3
+"""Generate a C++ source file from gamedb.yaml and discsets.yaml.
+
+The output is a compact lookup table containing only compatibility-relevant
+fields (traits, settings, controllers, libcrypt, codes, title).  The script
+is intentionally schema-agnostic: it passes through whatever keys it finds
+under 'traits' and 'settings' as string arrays, so new upstream fields
+propagate automatically.
+
+Usage:
+    generate_gamedb.py <gamedb.yaml> <discsets.yaml> <output.cpp>
+"""
+
+import sys
+import yaml
+
+
+def escape_c_string(s):
+    """Escape a string for use as a C string literal."""
+    out = []
+    for ch in s:
+        if ch == '\\':
+            out.append('\\\\')
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == '\n':
+            out.append('\\n')
+        elif ch == '\t':
+            out.append('\\t')
+        elif ch == '\r':
+            out.append('\\r')
+        elif ord(ch) < 0x20:
+            out.append(f'\\x{ord(ch):02x}')
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
+def main():
+    if len(sys.argv) != 4:
+        print(f"usage: {sys.argv[0]} <gamedb.yaml> <discsets.yaml> <output.cpp>",
+              file=sys.stderr)
+        sys.exit(1)
+
+    gamedb_path, discsets_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+    with open(gamedb_path, 'r', encoding='utf-8') as f:
+        gamedb = yaml.safe_load(f)
+
+    with open(discsets_path, 'r', encoding='utf-8') as f:
+        discsets = yaml.safe_load(f) or []
+
+    # Collect entries that have any compat-relevant data: traits, settings,
+    # libcrypt, or explicit controller lists (for unsupported-controller warnings).
+    entries = {}
+    for serial, entry in gamedb.items():
+        if ('traits' in entry or 'settings' in entry or
+                'libcrypt' in entry or 'controllers' in entry):
+            entries[serial] = entry
+
+    # Include entries referenced by disc sets — multi-disc games need the
+    # serial→entry mapping for shared memory card naming.
+    discset_serials = set()
+    for ds in discsets:
+        for s in ds.get('serials', []):
+            discset_serials.add(s)
+    for serial, entry in gamedb.items():
+        if serial in discset_serials and serial not in entries:
+            entries[serial] = entry
+
+    # Sort entries by serial for binary search
+    sorted_serials = sorted(entries.keys())
+
+    lines = []
+    w = lines.append
+
+    w('// Auto-generated from gamedb.yaml and discsets.yaml — do not edit.')
+    w('// This file is compiled only in __LIBRETRO__ builds.')
+    w('#include <cstddef>')
+    w('#include <cstdint>')
+    w('')
+    w('namespace GameDatabase {')
+    w('namespace Generated {')
+    w('')
+
+    # --- Trait arrays ---
+    w('// Per-entry trait name arrays (null-terminated)')
+    for i, serial in enumerate(sorted_serials):
+        entry = entries[serial]
+        traits = entry.get('traits', [])
+        if not traits:
+            continue
+        items = ', '.join(f'"{escape_c_string(t)}"' for t in traits)
+        w(f'static const char* const s_traits_{i}[] = {{{items}, nullptr}};')
+
+    w('')
+
+    # --- Setting key/value arrays ---
+    w('// Per-entry setting key-value pairs (key=nullptr terminates)')
+    w('struct SettingPair { const char* key; const char* value; };')
+    for i, serial in enumerate(sorted_serials):
+        entry = entries[serial]
+        settings = entry.get('settings', {})
+        if not settings:
+            continue
+        pairs = ', '.join(
+            f'{{"{escape_c_string(str(k))}", "{escape_c_string(str(v))}"}}'
+            for k, v in settings.items()
+        )
+        w(f'static const SettingPair s_settings_{i}[] = {{{pairs}, {{nullptr, nullptr}}}};')
+
+    w('')
+
+    # --- Controller arrays ---
+    w('// Per-entry controller name arrays (null-terminated)')
+    for i, serial in enumerate(sorted_serials):
+        entry = entries[serial]
+        controllers = entry.get('controllers', None)
+        if controllers is None:
+            continue
+        items = ', '.join(f'"{escape_c_string(c)}"' for c in controllers)
+        w(f'static const char* const s_controllers_{i}[] = {{{items}, nullptr}};')
+
+    w('')
+
+    # --- Code (alternate serial) arrays ---
+    w('// Per-entry alternate serial code arrays (null-terminated)')
+    for i, serial in enumerate(sorted_serials):
+        entry = entries[serial]
+        codes = entry.get('codes', [])
+        if not codes:
+            continue
+        items = ', '.join(f'"{escape_c_string(str(c))}"' for c in codes)
+        w(f'static const char* const s_codes_{i}[] = {{{items}, nullptr}};')
+
+    w('')
+
+    # --- Main entry table ---
+    w('struct GameEntry {')
+    w('  const char* serial;')
+    w('  const char* const* trait_names;')
+    w('  const SettingPair* settings;')
+    w('  const char* const* controller_names;')
+    w('  const char* const* codes;')
+    w('  bool has_controllers;')
+    w('  bool libcrypt;')
+    w('};')
+    w('')
+    w(f'extern const GameEntry s_entries[] = {{')
+
+    for i, serial in enumerate(sorted_serials):
+        entry = entries[serial]
+        traits = entry.get('traits', [])
+        settings = entry.get('settings', {})
+        controllers = entry.get('controllers', None)
+        codes = entry.get('codes', [])
+        libcrypt = entry.get('libcrypt', False)
+
+        traits_ref = f's_traits_{i}' if traits else 'nullptr'
+        settings_ref = f's_settings_{i}' if settings else 'nullptr'
+        controllers_ref = f's_controllers_{i}' if controllers is not None else 'nullptr'
+        codes_ref = f's_codes_{i}' if codes else 'nullptr'
+        has_controllers = 'true' if controllers is not None else 'false'
+        libcrypt_str = 'true' if libcrypt else 'false'
+
+        w(f'  {{"{escape_c_string(serial)}", '
+          f'{traits_ref}, {settings_ref}, {controllers_ref}, {codes_ref}, '
+          f'{has_controllers}, {libcrypt_str}}},')
+
+    w('};')
+    w(f'extern const size_t s_num_entries = {len(sorted_serials)};')
+    w('')
+
+    # --- Disc sets ---
+    w('// Disc set serial arrays (null-terminated)')
+    for i, ds in enumerate(discsets):
+        serials = ds.get('serials', [])
+        items = ', '.join(f'"{escape_c_string(s)}"' for s in serials)
+        w(f'static const char* const s_discset_serials_{i}[] = {{{items}, nullptr}};')
+
+    w('')
+    w('struct DiscSet {')
+    w('  const char* title;')
+    w('  const char* sort_title;')
+    w('  const char* localized_title;')
+    w('  const char* save_title;')
+    w('  const char* const* serials;')
+    w('};')
+    w('')
+    w(f'extern const DiscSet s_disc_sets[] = {{')
+
+    for i, ds in enumerate(discsets):
+        title = ds.get('name', '')
+        sort_title = ds.get('sortName', '')
+        localized_title = ds.get('localizedName', '')
+        save_title = ds.get('saveName', '')
+
+        def str_or_null(s):
+            return f'"{escape_c_string(s)}"' if s else 'nullptr'
+
+        w(f'  {{{str_or_null(title)}, {str_or_null(sort_title)}, '
+          f'{str_or_null(localized_title)}, {str_or_null(save_title)}, '
+          f's_discset_serials_{i}}},')
+
+    w('};')
+    w(f'extern const size_t s_num_disc_sets = {len(discsets)};')
+    w('')
+
+    w('} // namespace Generated')
+    w('} // namespace GameDatabase')
+    w('')
+
+    with open(out_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+
+    print(f"Generated {len(sorted_serials)} game entries and "
+          f"{len(discsets)} disc sets.", file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()
+PATCHEND
 mkdir -p 'cmake/lib/cmake/PNG'
 # Add: cmake/lib/cmake/PNG/PNGConfig.cmake
 cat > 'cmake/lib/cmake/PNG/PNGConfig.cmake' <<'PATCHEND'
@@ -1523,8 +1748,23 @@ endif()
 .
 156a
 if(BUILD_LIBRETRO)
-  target_sources(core PRIVATE hotkeys_stub.cpp)
+  target_sources(core PRIVATE hotkeys_stub.cpp game_database.cpp game_database.h)
   target_link_libraries(core PRIVATE xxhash rapidyaml cpuinfo::cpuinfo speex_resampler_headers)
+
+  # Generate compact C++ lookup table from game database YAML at build time.
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  set(GAMEDB_YAML "${CMAKE_SOURCE_DIR}/data/resources/gamedb.yaml")
+  set(DISCSETS_YAML "${CMAKE_SOURCE_DIR}/data/resources/discsets.yaml")
+  set(GENERATE_GAMEDB "${CMAKE_SOURCE_DIR}/cmake/generate_gamedb.py")
+  add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated_gamedb.cpp"
+    COMMAND ${Python3_EXECUTABLE} "${GENERATE_GAMEDB}"
+      "${GAMEDB_YAML}" "${DISCSETS_YAML}"
+      "${CMAKE_CURRENT_BINARY_DIR}/generated_gamedb.cpp"
+    DEPENDS "${GAMEDB_YAML}" "${DISCSETS_YAML}" "${GENERATE_GAMEDB}"
+    COMMENT "Generating game database lookup table"
+  )
+  target_sources(core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated_gamedb.cpp")
 else()
   target_sources(core PRIVATE hotkeys.cpp)
 .
@@ -2186,102 +2426,359 @@ inline void RequestExitBigPicture() {}
 inline const char* GetDefaultFullscreenUITheme() { return ""; }
 } // namespace Host
 PATCHEND
-# Modify: src/core/game_database.h
-ed -s 'src/core/game_database.h' <<'PATCHEND'
-244a
-#endif // !__LIBRETRO__
+# Modify: src/core/game_database.cpp
+ed -s 'src/core/game_database.cpp' <<'PATCHEND'
+1853a
+
+#else // __LIBRETRO__
+
+namespace GameDatabase {
+namespace Generated {
+struct SettingPair
+{
+  const char* key;
+  const char* value;
+};
+struct GameEntry
+{
+  const char* serial;
+  const char* const* trait_names;
+  const SettingPair* settings;
+  const char* const* controller_names;
+  const char* const* codes;
+  bool has_controllers;
+  bool libcrypt;
+};
+struct DiscSet
+{
+  const char* title;
+  const char* sort_title;
+  const char* localized_title;
+  const char* save_title;
+  const char* const* serials;
+};
+extern const GameEntry s_entries[];
+extern const size_t s_num_entries;
+extern const DiscSet s_disc_sets[];
+extern const size_t s_num_disc_sets;
+} // namespace Generated
+} // namespace GameDatabase
+
+static bool ApplyGeneratedSetting(GameDatabase::Entry* entry, const char* key, const char* value)
+{
+  if (std::strcmp(key, "displayActiveStartOffset") == 0)
+    entry->display_active_start_offset = static_cast<s16>(std::atoi(value));
+  else if (std::strcmp(key, "displayActiveEndOffset") == 0)
+    entry->display_active_end_offset = static_cast<s16>(std::atoi(value));
+  else if (std::strcmp(key, "displayLineStartOffset") == 0)
+    entry->display_line_start_offset = static_cast<s8>(std::atoi(value));
+  else if (std::strcmp(key, "displayLineEndOffset") == 0)
+    entry->display_line_end_offset = static_cast<s8>(std::atoi(value));
+  else if (std::strcmp(key, "displayCropMode") == 0)
+    entry->display_crop_mode = Settings::ParseDisplayCropMode(value);
+  else if (std::strcmp(key, "displayDeinterlacingMode") == 0)
+    entry->display_deinterlacing_mode = Settings::ParseDisplayDeinterlacingMode(value);
+  else if (std::strcmp(key, "gpuLineDetectMode") == 0)
+    entry->gpu_line_detect_mode = Settings::ParseLineDetectModeName(value);
+  else if (std::strcmp(key, "dmaMaxSliceTicks") == 0)
+    entry->dma_max_slice_ticks = static_cast<u32>(std::strtoul(value, nullptr, 10));
+  else if (std::strcmp(key, "dmaHaltTicks") == 0)
+    entry->dma_halt_ticks = static_cast<u32>(std::strtoul(value, nullptr, 10));
+  else if (std::strcmp(key, "cdromMaxSeekSpeedupCycles") == 0)
+    entry->cdrom_max_seek_speedup_cycles = static_cast<u32>(std::strtoul(value, nullptr, 10));
+  else if (std::strcmp(key, "cdromMaxReadSpeedupCycles") == 0)
+    entry->cdrom_max_read_speedup_cycles = static_cast<u32>(std::strtoul(value, nullptr, 10));
+  else if (std::strcmp(key, "gpuFIFOSize") == 0)
+    entry->gpu_fifo_size = static_cast<u32>(std::strtoul(value, nullptr, 10));
+  else if (std::strcmp(key, "gpuMaxRunAhead") == 0)
+    entry->gpu_max_run_ahead = static_cast<u32>(std::strtoul(value, nullptr, 10));
+  else if (std::strcmp(key, "gpuPGXPTolerance") == 0)
+    entry->gpu_pgxp_tolerance = std::strtof(value, nullptr);
+  else if (std::strcmp(key, "gpuPGXPDepthThreshold") == 0)
+    entry->gpu_pgxp_depth_threshold = std::strtof(value, nullptr);
+  else if (std::strcmp(key, "gpuPGXPPreserveProjFP") == 0)
+    entry->gpu_pgxp_preserve_proj_fp = (std::strcmp(value, "true") == 0 || std::strcmp(value, "1") == 0);
+  else if (std::strcmp(key, "cpuOverclockPercent") == 0)
+    entry->cpu_overclock = static_cast<u8>(std::atoi(value));
+  else
+  {
+    WARNING_LOG("Unknown gamedb setting key: {}", key);
+    return false;
+  }
+  return true;
+}
+
+bool GameDatabase::LoadFromGenerated()
+{
+  s_state.entries.reserve(Generated::s_num_entries);
+
+  UnorderedStringMap<std::string_view> code_to_serial;
+
+  for (size_t i = 0; i < Generated::s_num_entries; i++)
+  {
+    const Generated::GameEntry& gen = Generated::s_entries[i];
+
+    Entry& entry = s_state.entries.emplace_back();
+    entry.serial = gen.serial;
+    entry.supported_controllers = static_cast<u16>(~0u);
+
+    if (gen.has_controllers && gen.controller_names)
+    {
+      bool first = true;
+      for (const char* const* p = gen.controller_names; *p; p++)
+      {
+        const Controller::ControllerInfo* cinfo = Controller::GetControllerInfo(*p);
+        if (!cinfo)
+        {
+          WARNING_LOG("Invalid controller type {} in {}", *p, gen.serial);
+          continue;
+        }
+        if (first)
+        {
+          entry.supported_controllers = 0;
+          first = false;
+        }
+        entry.supported_controllers |= (1u << static_cast<u16>(cinfo->type));
+      }
+    }
+
+    if (gen.trait_names)
+    {
+      for (const char* const* p = gen.trait_names; *p; p++)
+      {
+        const auto iter = std::find(s_trait_names.begin(), s_trait_names.end(), std::string_view(*p));
+        if (iter == s_trait_names.end())
+        {
+          WARNING_LOG("Unknown trait {} in {}", *p, gen.serial);
+          continue;
+        }
+        entry.traits[static_cast<size_t>(std::distance(s_trait_names.begin(), iter))] = true;
+      }
+    }
+
+    if (gen.libcrypt)
+      entry.traits[static_cast<size_t>(Trait::IsLibCryptProtected)] = true;
+
+    if (gen.settings)
+    {
+      for (const Generated::SettingPair* sp = gen.settings; sp->key; sp++)
+        ApplyGeneratedSetting(&entry, sp->key, sp->value);
+    }
+
+    if (gen.codes)
+    {
+      for (const char* const* p = gen.codes; *p; p++)
+        code_to_serial.emplace(*p, gen.serial);
+    }
+    else
+    {
+      code_to_serial.emplace(gen.serial, gen.serial);
+    }
+  }
+
+  s_state.entries.shrink_to_fit();
+  std::sort(s_state.entries.begin(), s_state.entries.end(),
+            [](const Entry& lhs, const Entry& rhs) { return (lhs.serial < rhs.serial); });
+
+  for (const auto& [code, serial] : code_to_serial)
+  {
+    const auto it =
+      std::lower_bound(s_state.entries.cbegin(), s_state.entries.cend(), serial,
+                       [](const Entry& entry, const std::string_view& search) { return (entry.serial < search); });
+    if (it != s_state.entries.end() && it->serial == serial)
+    {
+      if (!s_state.code_lookup.emplace(code, static_cast<u32>(std::distance(s_state.entries.cbegin(), it))).second)
+        ERROR_LOG("Failed to insert code {}", code);
+    }
+  }
+
+  if (s_state.entries.empty())
+  {
+    ERROR_LOG("Generated game database is empty.");
+    return false;
+  }
+
+  // Load disc sets
+  s_state.disc_sets.reserve(Generated::s_num_disc_sets);
+  for (size_t i = 0; i < Generated::s_num_disc_sets; i++)
+  {
+    const Generated::DiscSet& gds = Generated::s_disc_sets[i];
+
+    DiscSetEntry& ds = s_state.disc_sets.emplace_back();
+    ds.title = gds.title ? gds.title : "";
+    ds.sort_title = gds.sort_title ? gds.sort_title : "";
+    ds.localized_title = gds.localized_title ? gds.localized_title : "";
+    ds.save_title = gds.save_title ? gds.save_title : "";
+
+    if (gds.serials)
+    {
+      for (const char* const* p = gds.serials; *p; p++)
+      {
+        const std::string_view serial_str(*p);
+        const auto entry_it =
+          std::lower_bound(s_state.entries.begin(), s_state.entries.end(), serial_str,
+                           [](const Entry& e, const std::string_view& s) { return (e.serial < s); });
+        if (entry_it == s_state.entries.end() || entry_it->serial != serial_str)
+        {
+          WARNING_LOG("Serial {} in disc set {} does not exist in game database.", serial_str, ds.title);
+          continue;
+        }
+        ds.serials.emplace_back(serial_str);
+      }
+    }
+
+    if (ds.serials.empty())
+    {
+      WARNING_LOG("Disc set {} has no valid serials, dropping.", ds.title);
+      s_state.disc_sets.pop_back();
+      continue;
+    }
+  }
+  s_state.disc_sets.shrink_to_fit();
+
+  // Bind disc sets to entries
+  for (DiscSetEntry& dsentry : s_state.disc_sets)
+  {
+    for (const std::string_view& serial : dsentry.serials)
+    {
+      const auto entry_it =
+        std::lower_bound(s_state.entries.begin(), s_state.entries.end(), serial,
+                         [](const Entry& e, const std::string_view& s) { return (e.serial < s); });
+      if (entry_it != s_state.entries.end() && entry_it->serial == serial)
+        entry_it->disc_set = &dsentry;
+    }
+  }
+
+  return true;
+}
+
+#endif // __LIBRETRO__
 .
-4a
+1344a
+#endif // !__LIBRETRO__
+
+#ifndef __LIBRETRO__
+.
+1100a
+#ifndef __LIBRETRO__
+.
+939a
+#endif
+.
+918a
+#ifdef __LIBRETRO__
+      ControllerType fallback = ControllerType::None;
+      if (supported_controllers & BIT_FOR(ControllerType::DigitalController))
+        fallback = ControllerType::DigitalController;
+      else if (supported_controllers & BIT_FOR(ControllerType::AnalogController))
+        fallback = ControllerType::AnalogController;
+
+      if (fallback != ControllerType::None)
+      {
+        s_controller_fallbacks[s_num_controller_fallbacks++] = {i, ctype, fallback};
+        INFO_LOG("GameDB: Port {} controller {} not supported, falling back to {}.", i + 1u,
+                 Controller::GetControllerInfo(ctype).GetDisplayName(),
+                 Controller::GetControllerInfo(fallback).GetDisplayName());
+        settings.controller_types[i] = fallback;
+      }
+#else
+.
+902a
+#ifdef __LIBRETRO__
+    ClearControllerFallbacks();
+#endif
+
+.
+224a
+#endif
+.
+205a
+#ifdef __LIBRETRO__
+  if (!LoadFromGenerated())
+  {
+    s_state.entries = {};
+    s_state.code_lookup = {};
+  }
+#else
+.
+61a
+#endif
+.
+54a
+#ifdef __LIBRETRO__
+static bool LoadFromGenerated();
+#else
+.
+53a
+#endif
+.
+51a
+#ifndef __LIBRETRO__
+.
+38a
 
 #ifdef __LIBRETRO__
-#include "game_database_libretro.h"
+static GameDatabase::ControllerFallbackRecord s_controller_fallbacks[NUM_CONTROLLER_AND_CARD_PORTS];
+static u32 s_num_controller_fallbacks = 0;
+
+const GameDatabase::ControllerFallbackRecord* GameDatabase::GetControllerFallbacks(u32& out_count)
+{
+  out_count = s_num_controller_fallbacks;
+  return s_controller_fallbacks;
+}
+
+void GameDatabase::ClearControllerFallbacks()
+{
+  s_num_controller_fallbacks = 0;
+}
+#endif
+.
+35a
 #else
+#define ICON_EMOJI_WARNING ""
+#define ICON_EMOJI_INFORMATION ""
+#endif
+.
+33a
+#ifndef __LIBRETRO__
+.
+24a
+#endif
+.
+23a
+#ifndef __LIBRETRO__
+.
+20a
+#endif
+.
+19a
+#ifndef __LIBRETRO__
+.
+10a
+#endif
+.
+9a
+#ifndef __LIBRETRO__
 .
 wq
 PATCHEND
-mkdir -p 'src/core'
-# Add: src/core/game_database_libretro.h
-cat > 'src/core/game_database_libretro.h' <<'PATCHEND'
-// Stub game_database for libretro builds — owned by GooseStation.
-#pragma once
-
-#include "types.h"
-
-#include <bitset>
-#include <optional>
-#include <string_view>
-#include <vector>
-
-namespace GameDatabase {
-
-enum class Trait : u32
+# Modify: src/core/game_database.h
+ed -s 'src/core/game_database.h' <<'PATCHEND'
+243a
+#ifdef __LIBRETRO__
+struct ControllerFallbackRecord
 {
-  ForceInterpreter,
-  ForceSoftwareRenderer,
-  ForceSoftwareRendererForReadbacks,
-  ForceRoundUpscaledTextureCoordinates,
-  ForceShaderBlending,
-  ForceFullTrueColor,
-  ForceDeinterlacing,
-  ForceFullBoot,
-  DisableAutoAnalogMode,
-  DisableMultitap,
-  DisableFastForwardMemoryCardAccess,
-  DisableCDROMReadSpeedup,
-  DisableCDROMSeekSpeedup,
-  DisableCDROMSpeedupOnMDEC,
-  DisableTrueColor,
-  DisableFullTrueColor,
-  DisableUpscaling,
-  DisableTextureFiltering,
-  DisableSpriteTextureFiltering,
-  DisableScaledDithering,
-  DisableScaledInterlacing,
-  DisableAllBordersCrop,
-  DisableWidescreen,
-  DisablePGXP,
-  DisablePGXPCulling,
-  DisablePGXPTextureCorrection,
-  DisablePGXPColorCorrection,
-  DisablePGXPDepthBuffer,
-  DisablePGXPOn2DPolygons,
-  ForcePGXPVertexCache,
-  ForcePGXPCPUMode,
-  ForceRecompilerICache,
-  ForceCDROMSubQSkew,
-  IsLibCryptProtected,
-
-  MaxCount
+  u32 port;
+  ControllerType original_type;
+  ControllerType fallback_type;
 };
 
-struct DiscSetEntry
-{
-  std::string_view title;
-  std::vector<std::string_view> serials;
-  std::string_view GetFirstSerial() const { return serials.empty() ? std::string_view{} : serials.front(); }
-  std::string_view GetSaveTitle() const { return title; }
-  std::string_view GetDisplayTitle(bool = false) const { return title; }
-};
+const ControllerFallbackRecord* GetControllerFallbacks(u32& out_count);
+void ClearControllerFallbacks();
+#endif
 
-struct Entry
-{
-  std::string_view serial;
-  std::string_view title;
-  const DiscSetEntry* disc_set = nullptr;
-  u16 supported_controllers = 0;
-  std::bitset<static_cast<size_t>(Trait::MaxCount)> traits{};
-
-  bool HasTrait(Trait trait) const { return traits.test(static_cast<size_t>(trait)); }
-  std::string_view GetSaveTitle() const { return serial; }
-  std::string_view GetDisplayTitle(bool = false) const { return title; }
-  bool IsFirstDiscInSet() const { return true; }
-  void ApplySettings(class Settings&, bool) const {}
-};
-
-inline const Entry* GetEntryForSerial(std::string_view) { return nullptr; }
-inline const Entry* GetEntryForGameDetails(const std::string&, u64) { return nullptr; }
-
-} // namespace GameDatabase
+.
+wq
 PATCHEND
 # Modify: src/core/game_list.h
 ed -s 'src/core/game_list.h' <<'PATCHEND'
@@ -3326,12 +3823,6 @@ bool System::LoadStateDataFromBuffer(std::span<const u8> data, u32 version, Erro
   return nullptr;
 #else
 .
-539a
-#endif
-.
-535a
-#ifndef __LIBRETRO__
-.
 165a
 
 #ifdef __LIBRETRO__
@@ -3382,17 +3873,6 @@ inline void StopMediaCapture()
 .
 299a
 bool LoadStateDataFromBuffer(std::span<const u8> data, u32 version, Error* error, bool update_display);
-.
-235a
-#endif
-.
-234a
-#ifdef __LIBRETRO__
-inline const GameDatabase::Entry* GetGameDatabaseEntry()
-{
-  return nullptr;
-}
-#else
 .
 wq
 PATCHEND
@@ -3831,8 +4311,6 @@ if(WIN32 AND NOT MSVC)
   )
 endif()
 
-# No resources needed — libretro cores are self-contained .so files.
-# Game database, shaders, fonts, etc. are all handled by RetroArch.
 PATCHEND
 mkdir -p 'src/goosestation-libretro'
 # Add: src/goosestation-libretro/libretro.h
@@ -12485,6 +12963,7 @@ cat > 'src/goosestation-libretro/main.cpp' <<'PATCHEND'
 #include "util/page_fault_handler.h"
 #include "core/timing_event.h"
 #include "core/fullscreenui.h"
+#include "core/game_database.h"
 #include "core/game_list.h"
 #include "core/gpu.h"
 #include "core/gpu_backend.h"
@@ -13133,10 +13612,86 @@ void Host::OnPerformanceCountersUpdated(const GPUBackend* gpu_backend)
 {
 }
 
+static void NotifyCompatibilitySettings()
+{
+  const GameDatabase::Entry* entry = System::GetGameDatabaseEntry();
+  if (!entry || !g_settings.apply_compatibility_settings)
+    return;
+
+  std::string lines;
+
+  for (u32 i = 0; i < static_cast<u32>(GameDatabase::Trait::MaxCount); i++)
+  {
+    if (entry->HasTrait(static_cast<GameDatabase::Trait>(i)))
+    {
+      if (!lines.empty())
+        lines += '\n';
+      lines += GameDatabase::GetTraitDisplayName(static_cast<GameDatabase::Trait>(i));
+    }
+  }
+
+  if (entry->dma_max_slice_ticks.has_value() || entry->dma_halt_ticks.has_value())
+  {
+    if (!lines.empty())
+      lines += '\n';
+    lines += "DMA timing adjustment";
+  }
+
+  if (entry->display_active_start_offset.has_value() || entry->display_active_end_offset.has_value() ||
+      entry->display_line_start_offset.has_value() || entry->display_line_end_offset.has_value())
+  {
+    if (!lines.empty())
+      lines += '\n';
+    lines += "Display offset adjustment";
+  }
+
+  if (entry->gpu_pgxp_tolerance.has_value() || entry->gpu_pgxp_depth_threshold.has_value())
+  {
+    if (!lines.empty())
+      lines += '\n';
+    lines += "PGXP tolerance adjustment";
+  }
+
+  if (entry->cpu_overclock.has_value())
+  {
+    if (!lines.empty())
+      lines += '\n';
+    lines += "CPU overclock adjustment";
+  }
+
+  u32 num_fallbacks = 0;
+  const auto* fallbacks = GameDatabase::GetControllerFallbacks(num_fallbacks);
+  for (u32 i = 0; i < num_fallbacks; i++)
+  {
+    if (!lines.empty())
+      lines += '\n';
+    lines += fmt::format("Port {}: {} -> {}",
+      fallbacks[i].port + 1,
+      Controller::GetControllerInfo(fallbacks[i].original_type).GetDisplayName(),
+      Controller::GetControllerInfo(fallbacks[i].fallback_type).GetDisplayName());
+  }
+
+  if (lines.empty())
+    return;
+
+  std::string msg = "Compatibility fixes applied:\n" + lines +
+                    "\n\nDisable via Core Options > Apply Compatibility Settings";
+
+  struct retro_message_ext msg_ext = {};
+  msg_ext.msg = msg.c_str();
+  msg_ext.duration = 8000;
+  msg_ext.priority = 2;
+  msg_ext.level = RETRO_LOG_INFO;
+  msg_ext.target = RETRO_MESSAGE_TARGET_ALL;
+  msg_ext.type = RETRO_MESSAGE_TYPE_NOTIFICATION;
+  s_environment_callback(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &msg_ext);
+}
+
 void Host::OnSystemGameChanged(const std::string& disc_path, const std::string& game_serial,
                                const std::string& game_name, GameHash hash)
 {
   LibretroLog(RETRO_LOG_INFO, "[GooseStation] Game: %s (%s)\n", game_name.c_str(), game_serial.c_str());
+  NotifyCompatibilitySettings();
 }
 
 void Host::OnSystemUndoStateAvailabilityChanged(bool available, u64 timestamp)
