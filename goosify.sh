@@ -15104,7 +15104,7 @@ void LibretroHost::PushVideoFrame()
         const u32 offset = (src_x_base + (((skip_x + x) * 3) / 2));
         const u16 s0 = src_row[offset % VRAM_WIDTH];
         const u16 s1 = src_row[(offset + 1) % VRAM_WIDTH];
-        const u8 shift = static_cast<u8>(x & 1u) * 8;
+        const u8 shift = static_cast<u8>((skip_x + x) & 1u) * 8;
         const u32 rgb = ((static_cast<u32>(s1) << 16) | static_cast<u32>(s0)) >> shift;
 
         const u8 r = static_cast<u8>(rgb);
