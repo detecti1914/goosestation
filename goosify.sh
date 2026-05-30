@@ -1882,6 +1882,14 @@ inline void OnAchievementsActiveChanged(bool active) {}
 inline void OnAchievementsHardcoreModeChanged(bool enabled) {}
 } // namespace Host
 PATCHEND
+# Modify: src/core/analog_controller.cpp
+ed -s 'src/core/analog_controller.cpp' <<'PATCHEND'
+379a
+    if (s_vibration_callback)
+      s_vibration_callback(m_index, motor, hvalue);
+.
+wq
+PATCHEND
 # Modify: src/core/bios.cpp
 ed -s 'src/core/bios.cpp' <<'PATCHEND'
 212s/^/  /
@@ -2089,6 +2097,15 @@ ed -s 'src/core/cheats.h' <<'PATCHEND'
 184a
 void SetLibretroCheat(unsigned index, bool enabled, const char* code);
 void ClearLibretroCheats();
+
+.
+wq
+PATCHEND
+# Modify: src/core/controller.h
+ed -s 'src/core/controller.h' <<'PATCHEND'
+120a
+  using VibrationCallback = void (*)(u32 pad_index, u32 motor, float intensity);
+  static inline VibrationCallback s_vibration_callback = nullptr;
 
 .
 wq
@@ -3216,6 +3233,10 @@ ed -s 'src/core/gpu_sw.cpp' <<'PATCHEND'
   return;
 #endif
 .
+339d
+338a
+        const u8 shift = static_cast<u8>((skip_x + col) & 1u) * 8;
+.
 52a
 #endif
 .
@@ -3444,6 +3465,18 @@ inline void LoadCurrentSlot() {}
 inline void SaveCurrentSlot() {}
 } // namespace SaveStateSelectorUI
 PATCHEND
+# Modify: src/core/jogcon.cpp
+ed -s 'src/core/jogcon.cpp' <<'PATCHEND'
+297a
+    if (s_vibration_callback)
+      s_vibration_callback(m_index, 0, f_strength);
+.
+277a
+      if (s_vibration_callback)
+        s_vibration_callback(m_index, 0, 0.0f);
+.
+wq
+PATCHEND
 # Modify: src/core/justifier.cpp
 ed -s 'src/core/justifier.cpp' <<'PATCHEND'
 293a
@@ -3527,6 +3560,15 @@ ed -s 'src/core/mdec.cpp' <<'PATCHEND'
 .
 wq
 PATCHEND
+# Modify: src/core/negcon_rumble.cpp
+ed -s 'src/core/negcon_rumble.cpp' <<'PATCHEND'
+281a
+    if (s_vibration_callback)
+      s_vibration_callback(m_index, motor, hvalue);
+.
+wq
+PATCHEND
+truncate -s -1 'src/core/negcon_rumble.cpp'
 # Modify: src/core/pcdrv.h
 ed -s 'src/core/pcdrv.h' <<'PATCHEND'
 18a
@@ -13056,6 +13098,7 @@ static retro_audio_sample_batch_t s_audio_sample_batch_callback;
 static retro_input_poll_t s_input_poll_callback;
 static retro_input_state_t s_input_state_callback;
 static retro_log_printf_t s_log_callback;
+static retro_rumble_interface s_rumble_interface = {};
 
 // =============================================================================
 // Internal state
@@ -14413,6 +14456,7 @@ void LibretroHost::UpdateControllers()
                                (lx > 0) ? (static_cast<float>(lx) / 32767.0f) : 0.0f);
     }
   }
+
 }
 
 void LibretroHost::UpdateVariables(bool force)
@@ -15104,7 +15148,7 @@ void LibretroHost::PushVideoFrame()
         const u32 offset = (src_x_base + (((skip_x + x) * 3) / 2));
         const u16 s0 = src_row[offset % VRAM_WIDTH];
         const u16 s1 = src_row[(offset + 1) % VRAM_WIDTH];
-        const u8 shift = static_cast<u8>(x & 1u) * 8;
+        const u8 shift = static_cast<u8>((skip_x + x) & 1u) * 8;
         const u32 rgb = ((static_cast<u32>(s1) << 16) | static_cast<u32>(s0)) >> shift;
 
         const u8 r = static_cast<u8>(rgb);
@@ -18270,6 +18314,19 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game)
     LibretroLog(RETRO_LOG_ERROR, "[GooseStation] XRGB8888 pixel format not supported\n");
     return false;
   }
+
+  if (!s_environment_callback(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &s_rumble_interface))
+    s_rumble_interface = {};
+
+  Controller::s_vibration_callback = [](u32 pad_index, u32 motor, float intensity) {
+    if (!s_rumble_interface.set_rumble_state)
+      return;
+    const u16 strength = static_cast<u16>(intensity * 65535.0f);
+    // Motor 0 = small/weak, motor 1 = large/strong.
+    s_rumble_interface.set_rumble_state(pad_index,
+                                       (motor == 1) ? RETRO_RUMBLE_STRONG : RETRO_RUMBLE_WEAK,
+                                       strength);
+  };
 
   {
     const char* renderer_value = nullptr;
