@@ -369,7 +369,7 @@ $(SWITCH_LIB): prepare
 	} | $(DEVKITPRO)/devkitA64/bin/aarch64-none-elf-ar -M
 	@mv $@.tmp $@
 	@cp $(ROOT)/goosestation_libretro.info $(SWITCH_DIST_DIR)/goosestation_libretro.info
-	@cp $(ROOT)/cursor_only.cfg $(SWITCH_DIST_DIR)/cursor_only.cfg
+	@cp $(SRC_DIR)/src/goosestation-libretro/overlays/cursor_only.cfg $(SWITCH_DIST_DIR)/cursor_only.cfg
 	@echo ""
 	@echo "Switch core built (static archive):"
 	@echo "  $@"

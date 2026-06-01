@@ -1202,6 +1202,15 @@ static std::vector<VMemReservation> s_vmem_reservations;
 static std::vector<CodeMemoryMapping> s_code_memories;
 static std::vector<Mirror> s_mappings;
 
+// See SetSharedMemoryUsesCodeMapping(): when false, MapSharedMemory returns a
+// plain heap pointer instead of an svcMapProcessCodeMemory alias.
+static bool s_shmem_uses_code_mapping = true;
+
+void MemMap::SetSharedMemoryUsesCodeMapping(bool enabled)
+{
+  s_shmem_uses_code_mapping = enabled;
+}
+
 static void* ReserveVirtmem(size_t size)
 {
   void* addr = virtmemFindAslr(size, 0x1000);
@@ -1328,11 +1337,12 @@ std::string MemMap::GetFileMappingName(const char* prefix)
   return {};
 }
 
-// Switch has no real POSIX shared memory. We don't need cross-process semantics
-// here — Bus uses shmem only to back RAM/BIOS/LUTs and (on platforms with mmap
-// fastmem) to alias RAM at a guard region. Fastmem is disabled on Switch
-// (ENABLE_MMAP_FASTMEM off), so a plain aligned heap allocation works: the
-// "handle" is the base pointer; MapSharedMemory just returns handle + offset.
+// Switch has no real POSIX shared memory, and we don't need cross-process
+// semantics here — Bus uses shmem only to back RAM/BIOS/LUTs and, under MMap
+// fastmem, to alias RAM into the fastmem arena. The backing is always a plain
+// aligned heap allocation; MapSharedMemory then either returns handle + offset
+// (LUT/Disabled, or non-fastmem builds) or an svcMapProcessCodeMemory alias of
+// it (MMap fastmem).
 void* MemMap::CreateSharedMemory(const char* name, size_t size, Error* error)
 {
   void* p = aligned_alloc(0x1000, (size + 0xFFF) & ~size_t(0xFFF));
@@ -1378,6 +1388,11 @@ void* MemMap::MapSharedMemory(void* handle, size_t offset, void* baseaddr, size_
 #if !defined(ENABLE_MMAP_FASTMEM)
   return static_cast<u8*>(handle) + offset;
 #else
+  // Heap pointer suffices when the backing isn't aliased into the fastmem arena;
+  // see MemMap::SetSharedMemoryCodeMapping().
+  if (!s_shmem_uses_code_mapping)
+    return static_cast<u8*>(handle) + offset;
+
   virtmemLock();
 
   if (!baseaddr)
@@ -1649,7 +1664,22 @@ void EndCodeWrite();
 /// JIT the RX (execute) and RW (write) mappings are separate; recompiler emits
 /// at logical/RX addresses but stores must target RW. No-op on single-mapped.
 void* GetJITMemoryWritePointer(void* ptr);
+
+void SetSharedMemoryUsesCodeMapping(bool enabled);
 #endif
+
+/// Selects how MapSharedMemory backs the RAM/BIOS/LUT shared memory on Switch: an
+/// svcMapProcessCodeMemory alias or a plain heap pointer. Only MMap fastmem needs
+/// the alias (it maps RAM into the fastmem arena via the same call); LUT/Disabled
+/// work on the raw heap pointer and thereby avoid svcMapProcessCodeMemory, which
+/// some HLE kernels like Ryujinx reject. No-op off Switch so call sites stay free
+/// of __SWITCH__ ifdefs.
+ALWAYS_INLINE static void SetSharedMemoryCodeMapping(bool enabled)
+{
+#if defined(__SWITCH__)
+  SetSharedMemoryUsesCodeMapping(enabled);
+#endif
+}
 
 /// Translates a JIT pointer to its writable mirror. No-op on platforms with a
 /// single RWX mapping; lets call sites stay free of __SWITCH__ ifdefs.
@@ -16512,7 +16542,10 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
       "goosestation_renderer", "GPU Renderer (Restart)", "Renderer",
       "Selects the backend to use for rendering the console/game visuals. Changing this requires restarting the core.",
       nullptr, "video",
-      {{"Software", "Software"}, {"OpenGL", "OpenGL"}, {"Vulkan", "Vulkan"},
+      {{"Software", "Software"}, {"OpenGL", "OpenGL"},
+#ifdef ENABLE_VULKAN
+       {"Vulkan", "Vulkan"},
+#endif
 #ifdef __SWITCH__
        {"Deko3D", "Deko3D"},
 #endif
@@ -18021,6 +18054,15 @@ RETRO_API void retro_init(void)
     LibretroLog(RETRO_LOG_ERROR, "[GooseStation] EarlyHWChecks failed: %s\n", error.GetDescription().c_str());
     return;
   }
+
+  // ProcessStartup() allocates the RAM backing, which happens before core options
+  // reach g_settings. Read the fastmem mode straight from the frontend so the Switch
+  // backing uses a plain heap pointer for LUT/Disabled, avoiding svcMapProcessCodeMemory
+  // (rejected by HLE kernels). MMap still needs the code-memory alias for its arena.
+  const char* fastmem_value = nullptr;
+  const bool fastmem_is_mmap = !GetVariable("goosestation_cpu_fastmem_mode", &fastmem_value) ||
+                               std::strcmp(fastmem_value, "MMap") == 0;
+  MemMap::SetSharedMemoryCodeMapping(fastmem_is_mmap);
 
   if (!Core::ProcessStartup(&error))
   {
