@@ -46,6 +46,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         unzip \
         ed \
         python3 \
+        python3-yaml \
         pkg-config \
         zlib1g-dev \
         file
