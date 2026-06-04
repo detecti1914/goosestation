@@ -46,12 +46,14 @@ ANDROID_STRIP = $(ANDROID_PREBUILT)/bin/llvm-strip
 MINGW_STRIP = llvm-strip
 JOBS ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
-.PHONY: all linux linux-unstripped android android-unstripped windows windows-unstripped macos macos-unstripped switch switch-retroarch clean distclean prepare help
+.PHONY: all linux linux-unstripped linux-static linux-static-unstripped android android-unstripped windows windows-unstripped macos macos-unstripped switch switch-retroarch clean distclean prepare help
 
 help:
 	@echo "Targets:"
-	@echo "  linux               build stripped libretro core for host Linux"
+	@echo "  linux               build stripped libretro core for host Linux (system libs)"
 	@echo "  linux-unstripped    same, keep debug symbols (.unstripped.so)"
+	@echo "  linux-static        build stripped libretro core for host Linux (deps baked in)"
+	@echo "  linux-static-unstripped  same, keep debug symbols (.unstripped.so)"
 	@echo "  android             build stripped libretro core for Android (arm64)"
 	@echo "  android-unstripped  same, keep debug symbols (.unstripped.so)"
 	@echo "  windows             build stripped libretro core for Windows x64 (mingw cross via LLVM)"
@@ -99,6 +101,16 @@ LINUX_BUILT := $(BUILD_ROOT)/linux/src/goosestation-libretro/goosestation_libret
 LINUX_UNSTRIPPED := $(LINUX_DIST_DIR)/goosestation_libretro.unstripped.so
 LINUX_SO := $(LINUX_DIST_DIR)/goosestation_libretro.so
 
+# linux-static: like linux, but every external dep (zlib/zstd/png/jpeg/webp/
+# shaderc/spirv-cross/cpuinfo) is built static
+LINUX_STATIC_MARCH ?= -march=x86-64-v2
+LINUX_STATIC_BUILD_DIR ?= $(CACHE_DIR)/linux-static-$(HOST_ARCH)
+LINUX_STATIC_DEPS_DIR ?= $(LINUX_STATIC_BUILD_DIR)/deps
+LINUX_STATIC_DIST_DIR := $(DIST_DIR)/linux-static-$(HOST_ARCH)
+LINUX_STATIC_BUILT := $(BUILD_ROOT)/linux-static/src/goosestation-libretro/goosestation_libretro.so
+LINUX_STATIC_UNSTRIPPED := $(LINUX_STATIC_DIST_DIR)/goosestation_libretro.unstripped.so
+LINUX_STATIC_SO := $(LINUX_STATIC_DIST_DIR)/goosestation_libretro.so
+
 ANDROID_BUILD_DIR ?= $(CACHE_DIR)/android
 ANDROID_DEPS_DIR ?= $(ANDROID_BUILD_DIR)/deps
 
@@ -145,6 +157,49 @@ $(LINUX_SO): $(LINUX_UNSTRIPPED)
 	@$(STRIP) --strip-unneeded $@
 	@echo ""
 	@echo "Linux core built (stripped):"
+	@echo "  $@"
+
+linux-static: $(LINUX_STATIC_SO)
+linux-static-unstripped: $(LINUX_STATIC_UNSTRIPPED)
+
+$(LINUX_STATIC_UNSTRIPPED): prepare $(LINUX_STATIC_DEPS_DIR)/.deps-ready
+	@echo "==> Configuring Linux static build"
+	@PKG_CONFIG_PATH="$(LINUX_STATIC_DEPS_DIR)/lib/pkgconfig:$${PKG_CONFIG_PATH}" \
+		$(CMAKE) -S $(SRC_DIR) -B $(BUILD_ROOT)/linux-static \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DBUILD_LIBRETRO=ON \
+		-DBUILD_REGTEST=OFF \
+		-DBUILD_TESTS=OFF \
+		-DENABLE_OPENGL=ON \
+		-DENABLE_VULKAN=ON \
+		-DGOOSE_LIBRETRO_STATIC_DEPS=ON \
+		-DCMAKE_MODULE_PATH=$(SRC_DIR)/cmake \
+		-DCMAKE_PREFIX_PATH="$(LINUX_STATIC_DEPS_DIR);$(SRC_DIR)/cmake" \
+		-DCMAKE_C_FLAGS="$(LINUX_STATIC_MARCH)" \
+		-DCMAKE_CXX_FLAGS="-Wno-invalid-offsetof $(LINUX_STATIC_MARCH)" \
+		-Wno-dev
+	@echo "==> Building"
+	@$(CMAKE) --build $(BUILD_ROOT)/linux-static --parallel $(JOBS) --target goosestation_libretro
+	@mkdir -p $(LINUX_STATIC_DIST_DIR)
+	@cp $(LINUX_STATIC_BUILT) $@
+	@cp $(ROOT)/goosestation_libretro.info $(LINUX_STATIC_DIST_DIR)/goosestation_libretro.info
+	@cp $(SRC_DIR)/src/goosestation-libretro/overlays/cursor_only.cfg $(LINUX_STATIC_DIST_DIR)/cursor_only.cfg
+	@echo ""
+	@echo "Linux static core built (unstripped):"
+	@echo "  $@"
+
+ifneq ($(filter $(CACHE_DIR)/%,$(LINUX_STATIC_DEPS_DIR)),)
+$(LINUX_STATIC_DEPS_DIR)/.deps-ready: $(ROOT)/build-linux-static-deps.sh
+	@echo "==> Building Linux static deps into $(LINUX_STATIC_BUILD_DIR)..."
+	@BUILD_DIR=$(LINUX_STATIC_BUILD_DIR) MARCH="$(LINUX_STATIC_MARCH)" bash $(ROOT)/build-linux-static-deps.sh
+	@touch $@
+endif
+
+$(LINUX_STATIC_SO): $(LINUX_STATIC_UNSTRIPPED)
+	@cp $< $@
+	@$(STRIP) --strip-unneeded $@
+	@echo ""
+	@echo "Linux static core built (stripped):"
 	@echo "  $@"
 
 android: $(ANDROID_SO)
@@ -414,6 +469,8 @@ distclean: clean
 # Only dist/ is mounted for output — no .cache/ needed.
 DOCKER_LINUX_IMAGE ?= goosestation-builder-linux
 DOCKER_LINUX_DOCKERFILE ?= Dockerfile.linux
+DOCKER_LINUX_STATIC_IMAGE ?= goosestation-builder-linux-static
+DOCKER_LINUX_STATIC_DOCKERFILE ?= Dockerfile.linux-static
 DOCKER_WINDOWS_IMAGE ?= goosestation-builder-windows
 DOCKER_WINDOWS_DOCKERFILE ?= Dockerfile.windows
 DOCKER_ANDROID_IMAGE ?= goosestation-builder-android
@@ -422,15 +479,20 @@ DOCKER_SWITCH_IMAGE ?= goosestation-builder-switch
 DOCKER_SWITCH_DOCKERFILE ?= Dockerfile.switch
 DOCKER_MOUNT_DIST := -v "$(CURDIR)/dist:/work/dist:Z"
 DOCKER_RUN_LINUX := docker run --rm $(DOCKER_MOUNT_DIST) $(DOCKER_LINUX_IMAGE)
+DOCKER_RUN_LINUX_STATIC := docker run --rm $(DOCKER_MOUNT_DIST) $(DOCKER_LINUX_STATIC_IMAGE)
 DOCKER_RUN_WINDOWS := docker run --rm $(DOCKER_MOUNT_DIST) $(DOCKER_WINDOWS_IMAGE)
 DOCKER_RUN_ANDROID := docker run --rm $(DOCKER_MOUNT_DIST) $(DOCKER_ANDROID_IMAGE)
 DOCKER_RUN_SWITCH := docker run --rm $(DOCKER_MOUNT_DIST) $(DOCKER_SWITCH_IMAGE)
 
-.PHONY: docker-linux-image docker-windows-image docker-android-image docker-switch-image
-.PHONY: docker-linux docker-android docker-windows docker-switch docker-all
+.PHONY: docker-linux-image docker-linux-static-image docker-windows-image docker-android-image docker-switch-image
+.PHONY: docker-linux docker-linux-static docker-android docker-windows docker-switch docker-all
 
 docker-linux-image:
 	docker build -t $(DOCKER_LINUX_IMAGE) -f $(DOCKER_LINUX_DOCKERFILE) \
+		--build-arg UPSTREAM_COMMIT=$(UPSTREAM_COMMIT) .
+
+docker-linux-static-image:
+	docker build -t $(DOCKER_LINUX_STATIC_IMAGE) -f $(DOCKER_LINUX_STATIC_DOCKERFILE) \
 		--build-arg UPSTREAM_COMMIT=$(UPSTREAM_COMMIT) .
 
 docker-windows-image:
@@ -450,6 +512,10 @@ docker-switch-image:
 docker-linux: docker-linux-image
 	@mkdir -p $(DIST_DIR)
 	@$(DOCKER_RUN_LINUX)
+
+docker-linux-static: docker-linux-static-image
+	@mkdir -p $(DIST_DIR)
+	@$(DOCKER_RUN_LINUX_STATIC)
 
 docker-android: docker-android-image
 	@mkdir -p $(DIST_DIR)

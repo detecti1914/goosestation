@@ -1,0 +1,75 @@
+### GooseStation libretro core builder — Linux (fully static, self-contained)
+###
+### Usage:
+###   docker build -f Dockerfile.linux-static -t goosestation-builder-linux-static .
+###   docker run --rm -v "$PWD/dist:/work/dist:Z" goosestation-builder-linux-static
+###
+### Same as Dockerfile.linux, but every external dep the core references
+### (zlib/zstd/png/jpeg/webp/shaderc/spirv-cross/cpuinfo) is built static
+
+# syntax=docker/dockerfile:1.6
+FROM debian:trixie-slim@sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a AS builder
+
+ARG TARGETARCH
+ARG UPSTREAM_COMMIT=3a10c16b10d3dd23155ccd83a3af97c421d3cab1
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CC=clang
+ENV CXX=clang++
+ENV LINUX_STATIC_BUILD_DIR=/opt/linux-static-build
+ENV LINUX_STATIC_DEPS_DIR=/opt/linux-static-build/deps
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends eatmydata \
+    && eatmydata apt-get install -y --no-install-recommends \
+        make \
+        libc6-dev \
+        clang \
+        llvm-dev \
+        lld \
+        cmake \
+        ninja-build \
+        git \
+        curl \
+        ca-certificates \
+        tar \
+        xz-utils \
+        ed \
+        python3 \
+        python3-yaml \
+        pkg-config \
+        libsdl3-dev \
+        libudev-dev \
+        libcurl4-openssl-dev \
+        libvulkan-dev \
+        file
+
+# --- Layer 2: static deps (zlib-ng, zstd, libpng, libjpeg-turbo, libwebp,
+#     SPIRV-Cross, shaderc, cpuinfo) built into the private static prefix ---
+COPY build-linux-static-deps.sh /tmp/build-linux-static-deps.sh
+RUN BUILD_DIR=${LINUX_STATIC_BUILD_DIR} bash /tmp/build-linux-static-deps.sh \
+    && touch ${LINUX_STATIC_DEPS_DIR}/.deps-ready \
+    && rm /tmp/build-linux-static-deps.sh
+
+# --- Layer 3: upstream source fetch + extract ---
+RUN mkdir -p /work/src \
+    && curl -fsSL "https://github.com/stenzek/duckstation/archive/${UPSTREAM_COMMIT}.tar.gz" \
+        | tar -xzf - -C /work/src
+
+# --- Layer 4: goosify (separated so goosify.sh edits don't re-fetch upstream) ---
+COPY goosify.sh /work/src/duckstation-${UPSTREAM_COMMIT}/goosify.sh
+RUN cd /work/src/duckstation-${UPSTREAM_COMMIT} && bash goosify.sh && touch .goosified
+
+# --- Layer 5: project files ---
+WORKDIR /work
+COPY . /work
+
+# --- Layer 6: build (cached until source, deps, or Makefile change) ---
+RUN make linux-static && mv dist/ /output/
+
+FROM busybox:1.37.0@sha256:1487d0af5f52b4ba31c7e465126ee2123fe3f2305d638e7827681e7cf6c83d5e
+COPY --from=builder /output/ /output/
+ENTRYPOINT ["sh", "-c", "cp -r /output/. /work/dist/"]

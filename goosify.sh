@@ -142,16 +142,25 @@ mkdir -p 'CMakeModules'
 # Add: CMakeModules/GooseLibretroLinking.cmake
 cat > 'CMakeModules/GooseLibretroLinking.cmake' <<'PATCHEND'
 # Static-link shaderc and spirv-cross into libretro cores on Android, macOS,
-# and Windows mingw. dlopen is impractical on Android (RetroArch loads cores
-# with RTLD_LOCAL, Play Store sandbox makes shipping extra .so files awkward);
-# on macOS/Windows nobody installs shaderc/spirv-cross system-wide, so the
-# same logic applies — bake them into the .dylib/.dll.
+# Windows mingw, and the Linux `linux-static` target. dlopen is impractical on
+# Android (RetroArch loads cores with RTLD_LOCAL, Play Store sandbox makes
+# shipping extra .so files awkward); on macOS/Windows nobody installs
+# shaderc/spirv-cross system-wide; and for the static Linux core the whole
+# point is to not depend on the host's libshaderc_shared.so / spirv-cross
+#
+# GOOSE_LIBRETRO_STATIC_DEPS is set by the linux-static Makefile target; it both
+# enables this static-link path and (via the compile definition below) flips the
+# matching #if branches in gpu_device.cpp from dlopen to direct symbol binding.
 
 if(NOT BUILD_LIBRETRO)
   return()
 endif()
-if(NOT (ANDROID OR (WIN32 AND NOT MSVC) OR APPLE))
+if(NOT (ANDROID OR (WIN32 AND NOT MSVC) OR APPLE OR GOOSE_LIBRETRO_STATIC_DEPS))
   return()
+endif()
+
+if(GOOSE_LIBRETRO_STATIC_DEPS)
+  target_compile_definitions(util PRIVATE GOOSE_LIBRETRO_STATIC_DEPS)
 endif()
 
 # shaderc_combined.a bundles shaderc + SPIRV-Tools + glslang into one archive.
@@ -219,12 +228,18 @@ if(ENABLE_VULKAN)
   # to static. src/util/CMakeLists.txt already handles either target.
   find_package(spirv_cross_c_shared QUIET)
   if(NOT spirv_cross_c_shared_FOUND)
-    # Static spirv-cross: spirv_cross_c imports the spirv-cross-c target which
-    # references siblings (glsl/hlsl/msl/cpp/reflect/core). Each ships its own
-    # cmake config; we have to load all so the imported targets resolve.
-    foreach(_spvc_comp core glsl hlsl msl cpp reflect c)
-      find_package(spirv_cross_${_spvc_comp} REQUIRED)
+    # Static spirv-cross: spirv_cross_c imports the spirv-cross-c target, which
+    # references whichever backend siblings were built. Each ships its own cmake
+    # config and must be loaded before spirv-cross-c so the imported targets
+    # resolve. core+glsl+c are always present; the other backends depend on what
+    # the deps build enabled (the linux-static / DuckStation build is GLSL-only,
+    # so hlsl/msl/cpp/reflect are absent), so load those opportunistically.
+    find_package(spirv_cross_core REQUIRED)
+    find_package(spirv_cross_glsl REQUIRED)
+    foreach(_spvc_comp hlsl msl cpp reflect util)
+      find_package(spirv_cross_${_spvc_comp} QUIET)
     endforeach()
+    find_package(spirv_cross_c REQUIRED)
   endif()
 endif()
 
@@ -22154,7 +22169,7 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
 #endif
 .
 1482a
-#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32))
+#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32) || defined(GOOSE_LIBRETRO_STATIC_DEPS))
   // Nothing to do — statically linked.
 #else
 .
@@ -22163,7 +22178,7 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
 .
 1449a
 
-#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32))
+#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32) || defined(GOOSE_LIBRETRO_STATIC_DEPS))
   // Android/Apple/Windows libretro builds link spirv-cross statically — assign function pointers directly.
   static bool s_spirv_cross_initialized = false;
   if (s_spirv_cross_initialized)
@@ -22186,7 +22201,7 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
   DYN_SHADERC_OPTIONAL_FUNCTIONS(UNLOAD_FUNC)
 .
 1427a
-#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32))
+#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32) || defined(GOOSE_LIBRETRO_STATIC_DEPS))
   if (g_shaderc_compiler)
   {
     ::shaderc_compiler_release(g_shaderc_compiler);
@@ -22211,7 +22226,7 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
 .
 1393a
 
-#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32))
+#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32) || defined(GOOSE_LIBRETRO_STATIC_DEPS))
   // Android/Apple/Windows libretro builds link shaderc statically — assign function pointers directly.
   if (g_shaderc_compiler)
     return true;
@@ -23230,7 +23245,7 @@ bool VulkanDevice::CreateDeviceFromExternal(VkPhysicalDevice physical_device, Vk
                                  false, nullptr);
 
   SetFeatures(create_flags, physical_device, enabled_features);
-  
+
   // Apply Adreno-specific workarounds for external device (MUST be after SetFeatures to stick)
 // Disable feedback loops and dual-source blend on Adreno to match OpenGL path which never uses these features
 // (OpenGL always falls back to simpler blending that works correctly)
