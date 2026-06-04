@@ -15,7 +15,9 @@ BUILD_ROOT := $(ROOT)/build
 DIST_DIR := $(ROOT)/dist
 
 ANDROID_NDK_VERSION ?= r29
-RETROARCH_BRANCH ?= deko3d-driver
+# Branch both build paths build from; it contains the deko3d backend directly
+# (no separate 0003 delta). Passed to the Docker build via --build-arg.
+RETROARCH_BRANCH ?= deko3d-driver-shaders
 NDK_HOST_ARCH := $(shell uname -m)
 ifeq ($(NDK_HOST_ARCH),$(filter $(NDK_HOST_ARCH),aarch64 arm64))
 ANDROID_NDK_ARCHIVE := $(CACHE_DIR)/android-ndk-$(ANDROID_NDK_VERSION)-linux-aarch64.tar.gz
@@ -433,6 +435,21 @@ RETROARCH_DIR    ?= $(CACHE_DIR)/RetroArch
 RETROARCH_PATCHES := $(ROOT)/patches/retroarch
 SWITCH_RA_NRO    := $(SWITCH_DIST_DIR)/goosestation_libretro_libnx.nro
 
+# Patched libuam. switch-retroarch points Makefile.libnx at it via a
+# LIBDIRS prepend below, so the patched libuam/uam.h win over the toolchain copy.
+# Each build path provisions it explicitly (host: update-build.sh runs switch-uam
+# before switch-retroarch; docker: Dockerfile.switch runs build-switch-uam.sh),
+# so it is NOT a prereq of the shared switch-retroarch target.
+# Override SWITCH_UAM_PREFIX to relocate (Dockerfile passes a fixed container dir).
+SWITCH_UAM_PREFIX ?= $(CACHE_DIR)/switch-uam
+SWITCH_UAM_STAMP := $(CACHE_DIR)/switch-uam.stamp
+$(SWITCH_UAM_STAMP): $(ROOT)/build-switch-uam.sh $(ROOT)/uam_redef.sh $(ROOT)/uam_prefix.h $(wildcard $(ROOT)/patches/uam/*.patch)
+	@PREFIX="$(SWITCH_UAM_PREFIX)" bash $(ROOT)/build-switch-uam.sh
+	@mkdir -p $(dir $@)
+	@touch $@
+
+switch-uam: $(SWITCH_UAM_STAMP)
+
 switch-retroarch: $(SWITCH_RA_NRO)
 
 $(SWITCH_RA_NRO): $(SWITCH_LIB)
@@ -450,7 +467,13 @@ $(SWITCH_RA_NRO): $(SWITCH_LIB)
 	 test -n "$$HANDLER_OBJ" || { echo "ERROR: could not find page_fault_handler object in build tree"; exit 1; }; \
 	 cp "$$HANDLER_OBJ" $(RETROARCH_DIR)/goose_excpt.o
 	@echo "==> Building RetroArch NRO (Makefile.libnx)"
-	@$(MAKE) -C $(RETROARCH_DIR) -f Makefile.libnx -j$(JOBS) HAVE_STATIC_DUMMY=
+	@# Prepend our self-contained libuam prefix to LIBDIRS so the patched
+	@# libuam.a + uam.h are linked/included ahead of the toolchain's copies,
+	@# without modifying the system devkitPro. (PORTLIBS=$$DEVKITPRO/portlibs/switch,
+	@# LIBNX=$$DEVKITPRO/libnx — reconstructed here since we replace LIBDIRS.)
+	@test -f "$(SWITCH_UAM_PREFIX)/lib/libuam.a" || { echo "ERROR: patched libuam not provisioned at $(SWITCH_UAM_PREFIX) — run 'make switch-uam' (host) or provision in Docker"; exit 1; }
+	@$(MAKE) -C $(RETROARCH_DIR) -f Makefile.libnx -j$(JOBS) HAVE_STATIC_DUMMY= \
+		LIBDIRS="$(SWITCH_UAM_PREFIX) $(DEVKITPRO)/portlibs/switch $(DEVKITPRO)/libnx"
 	@mkdir -p $(SWITCH_DIST_DIR)
 	@cp $(RETROARCH_DIR)/retroarch_switch.nro $@
 	@cp $(RETROARCH_DIR)/retroarch_switch.elf $(SWITCH_DIST_DIR)/retroarch_switch.elf

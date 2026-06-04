@@ -1,0 +1,23 @@
+diff --git a/mesa-imported/codegen/nv50_ir_peephole.cpp b/mesa-imported/codegen/nv50_ir_peephole.cpp
+index f12f68f..9d45e5f 100644
+--- a/mesa-imported/codegen/nv50_ir_peephole.cpp
++++ b/mesa-imported/codegen/nv50_ir_peephole.cpp
+@@ -4085,7 +4085,17 @@ Program::optimizePostRA(int level)
+ {
+    RUN_PASS(2, FlatteningPass, run);
+    RUN_PASS(2, PostRaLoadPropagation, run);
+-   RUN_PASS(2, PostRADualIssue, run);
++   /* PostRADualIssue DISABLED. This experimental dual-issue reordering pass
++    * (karolherbst's never-merged dual_issue_v3 branch + uam-local "experimental"
++    * tweaks; not in mainline mesa) reorders instructions across a dependency its
++    * commutation-legality check fails to detect, producing intermittent
++    * miscompiles. On Maxwell (Tegra X1) this manifests as dancing black
++    * "knife-cut" artifacts in heavy multi-pass slang shaders (the crt-guest-
++    * advanced deconvergence final pass). Mainline mesa/nouveau performs no
++    * dual-issue scheduling at all; disabling this restores that known-good
++    * behaviour. Cost is ~2% vs full opt2 (the SSA passes keep the instruction-
++    * count reduction); still ~15% faster than optLevel 1.
++    * RUN_PASS(2, PostRADualIssue, run); */
+ 
+    return true;
+ }

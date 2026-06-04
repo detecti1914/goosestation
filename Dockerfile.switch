@@ -15,7 +15,7 @@
 FROM docker.io/devkitpro/devkita64:20260219@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282 AS builder
 
 ARG UPSTREAM_COMMIT=3a10c16b10d3dd23155ccd83a3af97c421d3cab1
-ARG RETROARCH_BRANCH=deko3d-driver
+ARG RETROARCH_BRANCH=deko3d-driver-shaders
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV RETROARCH_DIR=/opt/RetroArch
@@ -44,41 +44,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libshaderc-dev \
         libspirv-cross-c-shared-dev
 
-# UAM: runtime GLSL→DKSH compiler for deko3d.
-# RSDuck fork (library-target branch) provides uam.h + libuam.a.
-# meson+bison+flex+mako: UAM build deps (apt layer is cached without them).
+# UAM: runtime GLSL→DKSH compiler for deko3d (RSDuck fork). Built — patched to
+# disable the broken experimental PostRADualIssue pass — into a self-contained
+# prefix via the SAME script the host build uses (build-switch-uam.sh), so both
+# paths produce an identical patched libuam. SWITCH_UAM_PREFIX is consumed by
+# `make switch-retroarch` below (LIBDIRS prepend)
 RUN apt-get update && eatmydata apt-get install -y --no-install-recommends meson python3-mako bison flex
 ARG UAM_COMMIT=6599d8e32a735baec09dc5a4549622cb82bd829a
-# Script: rename UAM-defined symbols to avoid RA mesa collision.
-COPY uam_redef.sh /tmp/uam_redef.sh
-RUN git clone https://github.com/RSDuck/uam.git /tmp/uam \
-    && cd /tmp/uam \
-    && git checkout ${UAM_COMMIT} \
-    && echo "option('build_as_library', type: 'boolean', value: false, description: 'Build uam as a static library instead of an executable')" > meson_options.txt \
-    && meson setup build --cross-file crossfile \
-        --prefix=$DEVKITPRO/portlibs/switch \
-        --buildtype=release \
-        -Dbuild_as_library=true \
-        -Dcpp_args=-fno-omit-frame-pointer \
-        -Dc_args=-fno-omit-frame-pointer \
-    && ninja -C build \
-    && test -f build/libuam.a \
-    && mkdir -p $DEVKITPRO/portlibs/switch/include $DEVKITPRO/portlibs/switch/lib \
-    && cp source/uam.h $DEVKITPRO/portlibs/switch/include/ \
-    && cd build \
-    && $DEVKITPRO/devkitA64/bin/aarch64-none-elf-ar -t libuam.a > /tmp/uam_members.txt \
-    && $DEVKITPRO/devkitA64/bin/aarch64-none-elf-ar rcs libuam_fat.a $(cat /tmp/uam_members.txt) \
-    && bash /tmp/uam_redef.sh libuam_fat.a /tmp/uam_redef $DEVKITPRO/portlibs/switch/lib/libuam.a \
-    && cd / \
-    && rm -rf /tmp/uam
-
-# Prepend symbol-redirect macros to uam.h (objcopy --redefine-syms renamed
-# uam_init→__uam_uam_init etc; macros let callers use the original names).
-COPY uam_prefix.h /tmp/uam_prefix.h
-RUN cat /tmp/uam_prefix.h $DEVKITPRO/portlibs/switch/include/uam.h \
-        > /tmp/uam_combined.h \
-    && mv /tmp/uam_combined.h $DEVKITPRO/portlibs/switch/include/uam.h \
-    && rm /tmp/uam_prefix.h
+ENV SWITCH_UAM_PREFIX=/opt/goose-uam
+COPY uam_redef.sh uam_prefix.h build-switch-uam.sh /tmp/uamsrc/
+COPY patches/uam/ /tmp/uamsrc/patches/uam/
+RUN UAM_COMMIT=${UAM_COMMIT} PREFIX=${SWITCH_UAM_PREFIX} bash /tmp/uamsrc/build-switch-uam.sh \
+    && rm -rf /tmp/uamsrc
 
 # switch-portlibs: zlib, libpng, libwebp, freetype, libzip, mbedtls, etc.
 RUN --mount=type=cache,target=/opt/devkitpro/pacman/cache,sharing=locked \
