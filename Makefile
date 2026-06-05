@@ -75,6 +75,15 @@ all: linux android windows
 
 prepare: $(SRC_DIR)/.goosified
 	@mkdir -p "$(DIST_DIR)" "$(CACHE_DIR)"
+	@# Build dirs embed the upstream source path in their CMakeCache. When the pin
+	@# changes, that cache points at a now-missing source and cmake aborts. Wipe the
+	@# build dirs (not the deps cache) so they reconfigure against the new source.
+	@if [ -f "$(BUILD_ROOT)/.upstream" ] && [ "$$(cat $(BUILD_ROOT)/.upstream)" != "$(UPSTREAM_COMMIT)" ]; then \
+		echo "==> Upstream pin changed to $(UPSTREAM_COMMIT); wiping stale build dirs"; \
+		rm -rf "$(BUILD_ROOT)"; \
+	fi
+	@mkdir -p "$(BUILD_ROOT)"
+	@echo "$(UPSTREAM_COMMIT)" > "$(BUILD_ROOT)/.upstream"
 	@echo "Prepared host dirs: $(DIST_DIR) $(CACHE_DIR)"
 
 $(TARBALL):
