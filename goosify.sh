@@ -2984,6 +2984,7 @@ inline void OnSystemResumed() {}
 PATCHEND
 # Modify: src/core/gpu.cpp
 ed -s 'src/core/gpu.cpp' <<'PATCHEND'
+1448s/ALWAYS_INLINE //
 3910a
 
 #endif
@@ -3006,12 +3007,12 @@ u16 GPU::GetDisplayAddressStartX()
 {
   return s_locals.crtc_state.regs.X;
 }
-
-bool GPU::IsDisplayDisabled()
-{
-  return s_locals.GPUSTAT.display_disable;
-}
 #endif
+.
+111d
+110a
+/// Exposed (non-static) so the libretro frontend can query display-off state.
+bool IsDisplayDisabled();
 .
 49a
 #endif
@@ -13548,8 +13549,9 @@ void Host::ReportStatusMessage(std::string_view message)
               static_cast<int>(message.size()), message.data());
 }
 
-void Host::ConfirmMessageAsync(std::string_view title, std::string_view message, ConfirmMessageAsyncCallback callback,
-                               std::string_view yes_text, std::string_view no_text)
+void Host::ConfirmMessageAsync(std::string_view icon, std::string_view title, std::string_view message,
+                               ConfirmMessageAsyncCallback callback, std::string_view yes_text,
+                               std::string_view no_text)
 {
   LibretroLog(RETRO_LOG_WARN, "[GooseStation] Confirm: %.*s: %.*s\n",
               static_cast<int>(title.size()), title.data(),
@@ -18218,10 +18220,13 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info)
   }
   else
   {
+    // PSX CRTC active scanline counts (mirror GPU's internal {PAL,NTSC}_VERTICAL_ACTIVE
+    // constants, which upstream keeps file-local to gpu.cpp): PAL 308-20, NTSC 256-16.
+    constexpr u32 PAL_ACTIVE_LINES = 288;
+    constexpr u32 NTSC_ACTIVE_LINES = 240;
     info->geometry.base_width = 320;
-    info->geometry.base_height = (LibretroHost::s_console_region == ConsoleRegion::PAL)
-                                   ? (GPU::PAL_VERTICAL_ACTIVE_END - GPU::PAL_VERTICAL_ACTIVE_START)
-                                   : (GPU::NTSC_VERTICAL_ACTIVE_END - GPU::NTSC_VERTICAL_ACTIVE_START);
+    info->geometry.base_height =
+      (LibretroHost::s_console_region == ConsoleRegion::PAL) ? PAL_ACTIVE_LINES : NTSC_ACTIVE_LINES;
   }
 
   if (LibretroHost::s_hw_render_enabled)
@@ -18810,6 +18815,9 @@ if(NOT BUILD_LIBRETRO)
 target_sources(util PRIVATE compress_helpers.cpp compress_helpers.h core_audio_stream.cpp core_audio_stream.h ini_settings_interface.cpp ini_settings_interface.h input_manager.cpp input_manager.h shadergen.cpp shadergen.h)
 if(NOT BUILD_LIBRETRO)
   target_sources(util PRIVATE imgui_gsvector.h animated_image.cpp animated_image.h input_source.cpp input_source.h media_capture.cpp)
+else()
+  # No networking backend in the libretro core; stub the HTTP downloader lifecycle.
+  target_sources(util PRIVATE http_downloader_stub.cpp)
 .
 90,91d
 87a
@@ -22249,6 +22257,14 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
 1674a
 #if defined(_WIN32) && !defined(__LIBRETRO__)
 .
+1556a
+#endif
+.
+1554a
+#ifndef __LIBRETRO__
+  // System/standard shaderc's set_generate_debug_info takes only `options`; the extra
+  // arguments exist solely in DuckStation's patched shaderc.
+.
 1497a
 
   // System shaderc doesn't provide DuckStation's custom optimizer.
@@ -22423,6 +22439,31 @@ inline void Shutdown() {}
 inline void PollRequests() {}
 
 } // namespace HTTPCache
+PATCHEND
+mkdir -p 'src/util'
+# Add: src/util/http_downloader_stub.cpp
+cat > 'src/util/http_downloader_stub.cpp' <<'PATCHEND'
+// GooseStation: HTTP downloader stubs for libretro builds.
+//
+// The libretro core ships no networking backend, so http_downloader.cpp is not
+// compiled. Upstream drives the downloader lifecycle from core/system (Shutdown
+// on teardown, PollRequests each frame); provide no-op definitions so those
+// unconditional calls link. Request-creating entry points are never reached in
+// the libretro build (achievements/game-list networking is excluded).
+
+#include "http_downloader.h"
+
+namespace HTTPDownloader {
+
+void Shutdown()
+{
+}
+
+void PollRequests()
+{
+}
+
+} // namespace HTTPDownloader
 PATCHEND
 # Modify: src/util/image.cpp
 ed -s 'src/util/image.cpp' <<'PATCHEND'
