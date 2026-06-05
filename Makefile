@@ -412,6 +412,7 @@ $(SWITCH_LIB): prepare
 		-DCMAKE_CXX_FLAGS="-Wno-invalid-offsetof -flax-vector-conversions" \
 		-DSHADERC_INCLUDE_DIR=$(SHADER_HEADERS) \
 		-DSPIRV_CROSS_INCLUDE_DIR=$(SHADER_HEADERS)/spirv_cross \
+		-DSWITCH_UAM_PREFIX=$(SWITCH_UAM_PREFIX) \
 		-Wno-dev
 	@echo "==> Building"
 	@$(CMAKE) --build $(BUILD_ROOT)/switch --parallel $(JOBS) --target goosestation_libretro
@@ -472,8 +473,14 @@ $(SWITCH_RA_NRO): $(SWITCH_LIB)
 	@# without modifying the system devkitPro. (PORTLIBS=$$DEVKITPRO/portlibs/switch,
 	@# LIBNX=$$DEVKITPRO/libnx — reconstructed here since we replace LIBDIRS.)
 	@test -f "$(SWITCH_UAM_PREFIX)/lib/libuam.a" || { echo "ERROR: patched libuam not provisioned at $(SWITCH_UAM_PREFIX) — run 'make switch-uam' (host) or provision in Docker"; exit 1; }
+	@# LIBDIRS feeds LIBPATHS (link finds patched libuam.a). The compile needs the
+	@# include separately: Makefile.libnx builds in-place (no build/ recursion), so
+	@# its LIBDIRS-derived INCLUDE is expanded into CFLAGS before it is defined and
+	@# is dead. GOOSE_UAM_INC (added by 0002-switch-bundle.patch) injects the patched
+	@# uam.h ahead of -I$(PORTLIBS)/include so it wins over any system copy.
 	@$(MAKE) -C $(RETROARCH_DIR) -f Makefile.libnx -j$(JOBS) HAVE_STATIC_DUMMY= \
-		LIBDIRS="$(SWITCH_UAM_PREFIX) $(DEVKITPRO)/portlibs/switch $(DEVKITPRO)/libnx"
+		LIBDIRS="$(SWITCH_UAM_PREFIX) $(DEVKITPRO)/portlibs/switch $(DEVKITPRO)/libnx" \
+		GOOSE_UAM_INC="-I$(SWITCH_UAM_PREFIX)/include"
 	@mkdir -p $(SWITCH_DIST_DIR)
 	@cp $(RETROARCH_DIR)/retroarch_switch.nro $@
 	@cp $(RETROARCH_DIR)/retroarch_switch.elf $(SWITCH_DIST_DIR)/retroarch_switch.elf

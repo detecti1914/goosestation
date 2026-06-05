@@ -15,6 +15,12 @@ diff --git a/Makefile.libnx b/Makefile.libnx
 index e35310bd1d..8ac6c9c9cb 100644
 --- a/Makefile.libnx
 +++ b/Makefile.libnx
+@@ -133,4 +133,4 @@
+ CFLAGS := -g -Wall -O3 -fcommon -ffunction-sections \
+-          $(ARCH) $(DEFINES) $(INCLUDE_DIRS) -I$(LIBNX)/include -I$(PORTLIBS)/include/ -include $(LIBNX)/include/switch.h #$(shell $(PORTLIBS)/bin/freetype-config --cflags)
++          $(ARCH) $(DEFINES) $(INCLUDE_DIRS) $(GOOSE_UAM_INC) -I$(LIBNX)/include -I$(PORTLIBS)/include/ -include $(LIBNX)/include/switch.h #$(shell $(PORTLIBS)/bin/freetype-config --cflags)
+
+ CFLAGS += $(INCLUDE) -DSWITCH=1 -DHAVE_LIBNX=1 -DNXLINK=1 -DHAVE_SHADERPIPELINE -DHAVE_ONLINE_UPDATER -DHAVE_UPDATE_ASSETS -DHAVE_UPDATE_CORES -DHAVE_UPDATE_CORE_INFO -DHAVE_STB_FONT #-DHAVE_FREETYPE
 @@ -151,7 +151,7 @@ LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,--allow-multiple-de
  # add things from Makefile.common
  CFLAGS += $(DEF_FLAGS)
