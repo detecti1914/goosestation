@@ -1,7 +1,7 @@
 # GooseStation libretro core builder.
 #
 
-UPSTREAM_COMMIT := 3a10c16b10d3dd23155ccd83a3af97c421d3cab1
+UPSTREAM_COMMIT := e8938f06347e4837c32ef4c71c21cbd43245f244
 
 UPSTREAM_URL := https://github.com/stenzek/duckstation/archive/$(UPSTREAM_COMMIT).tar.gz
 

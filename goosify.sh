@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Patch: 3a10c16b10d3dd23155ccd83a3af97c421d3cab1 → WORKING
+# Patch: e8938f06347e4837c32ef4c71c21cbd43245f244 → WORKING
 # M = smart ed (indent→s, del→d, add→a), A = copy file, D = rm
 set -e
 echo 'GOOSIFYING...'
@@ -51,15 +51,24 @@ if(LINUX OR BSD OR ANDROID)
   set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
 endif()
 
-if(COMPILER_CLANG OR COMPILER_GCC)
+# Force debug symbols for Linux builds.
+add_debug_symbol_flag(CMAKE_C_FLAGS_RELEASE)
+add_debug_symbol_flag(CMAKE_CXX_FLAGS_RELEASE)
+
+# Warning disables.
+if(COMPILER_CLANG OR COMPILER_CLANG_CL OR COMPILER_GCC)
   include(CheckCXXFlag)
   check_cxx_flag(-Wall COMPILER_SUPPORTS_WALL)
   check_cxx_flag(-Wno-invalid-offsetof COMPILER_SUPPORTS_OFFSETOF)
 endif()
 
+# We don't need exceptions, disable them to save a bit of code size.
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -fno-rtti")
 
-if("${CMAKE_BUILD_TYPE}" STREQUAL "Release" AND (COMPILER_CLANG OR COMPILER_GCC))
+# Rewrite paths in macros to be relative to the source directory.
+# Helpful for reproducible builds.
+if("${CMAKE_BUILD_TYPE}" STREQUAL "Release" AND NOT CMAKE_GENERATOR MATCHES "Xcode" AND
+   (COMPILER_CLANG OR COMPILER_CLANG_CL OR COMPILER_GCC))
   file(RELATIVE_PATH source_dir_remap "${CMAKE_BINARY_DIR}" "${CMAKE_SOURCE_DIR}")
   string(REGEX REPLACE "\/+$" "" source_dir_remap "${source_dir_remap}")
   set(source_dir_remap_str "\"${CMAKE_SOURCE_DIR}\"=\"${source_dir_remap}\"")
@@ -78,23 +87,33 @@ add_subdirectory(src)
 PATCHEND
 # Modify: CMakeModules/DuckStationBuildSummary.cmake
 ed -s 'CMakeModules/DuckStationBuildSummary.cmake' <<'PATCHEND'
-24,41d
+32,49d
 wq
 PATCHEND
 # Modify: CMakeModules/DuckStationUtils.cmake
 ed -s 'CMakeModules/DuckStationUtils.cmake' <<'PATCHEND'
-27a
+27s/^  /	/
+28s/^    /		/
+29s/^  /	/
+30s/^    /		/
+31s/^  /	/
+32s/^    /		/
+33s/^  /	/
+34s/^    /		/
+35s/^  /	/
+30a
 	elseif(ANDROID)
 		message(STATUS "Building for Android.")
 .
-22d
-21a
+24,26d
+23a
 	if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" OR CMAKE_SYSTEM_NAME STREQUAL "Switch")
 		set(SWITCH TRUE PARENT_SCOPE)
 		set(SWITCH TRUE)
 		add_definitions(-D__SWITCH__)
 		message(STATUS "Building for Nintendo Switch.")
 	elseif(WIN32)
+		message(STATUS "Building for Windows.")
 .
 wq
 PATCHEND
@@ -672,11 +691,11 @@ include("${CMAKE_CURRENT_LIST_DIR}/../../../Findzstd.cmake")
 PATCHEND
 # Modify: dep/CMakeLists.txt
 ed -s 'dep/CMakeLists.txt' <<'PATCHEND'
-21,22s/^/  /
-22a
+27,28s/^/  /
+28a
 endif()
 .
-20a
+26a
 if(NOT BUILD_LIBRETRO)
 .
 wq
@@ -885,10 +904,18 @@ PATCHEND
 # Modify: src/CMakeLists.txt
 ed -s 'src/CMakeLists.txt' <<'PATCHEND'
 5s/^/  /
-7,9s/^/  /
-11,13s/^/  /
-13a
+8s/^/  /
+8a
   endif()
+
+  if(WIN32)
+    add_subdirectory(installer)
+    add_subdirectory(uninstaller)
+  endif()
+.
+7d
+6a
+  if(WIN32 OR APPLE)
 .
 4a
 
@@ -919,11 +946,8 @@ wq
 PATCHEND
 # Modify: src/common/CMakeLists.txt
 ed -s 'src/common/CMakeLists.txt' <<'PATCHEND'
-90s/^/  /
-95,97s/^  //
-99,100s/^  //
-117s/^/  /
-127a
+103s/^/  /
+113a
 
 if(SWITCH)
   target_compile_definitions(common PUBLIC __SWITCH__)
@@ -931,35 +955,39 @@ endif()
 
 target_compile_definitions(common PUBLIC ENABLE_MMAP_FASTMEM=1)
 .
-117a
+103a
   endif()
 .
-116a
+102a
   if(NOT BUILD_LIBRETRO)
 .
-101d
-98d
-97a
-elseif(MSVC AND (CPU_ARCH_ARM32 OR CPU_ARCH_ARM64))
-.
-93,94d
-92a
-if(WIN32 AND CPU_ARCH_X64)
-.
-90a
-  else()
-    # mingw: equivalents of OneCore.lib for VirtualAlloc2/PathCchCanonicalizeEx etc.
-    target_link_libraries(common PRIVATE pathcch onecore)
-  endif()
-.
 89a
+if(WIN32)
+  target_sources(common PRIVATE
+    windows_headers.h
+  )
   if(MSVC)
     target_sources(common PRIVATE
       thirdparty/StackWalker.cpp
       thirdparty/StackWalker.h
     )
+    target_link_libraries(common PRIVATE OneCore.lib)
+  else()
+    # mingw: equivalents of OneCore.lib for VirtualAlloc2/PathCchCanonicalizeEx etc.
+    target_link_libraries(common PRIVATE pathcch onecore)
+  endif()
+endif()
+
+if(WIN32 AND CPU_ARCH_X64)
+  enable_language(ASM_MASM)
+  target_sources(common PRIVATE fastjmp_x86.asm)
+  set_source_files_properties(fastjmp_x86.asm PROPERTIES COMPILE_FLAGS "/D_M_X86_64")
+elseif(MSVC AND (CPU_ARCH_ARM32 OR CPU_ARCH_ARM64))
+  enable_language(ASM_MARMASM)
+  target_sources(common PRIVATE fastjmp_arm.asm)
+endif()
+
 .
-86,87d
 wq
 PATCHEND
 # Modify: src/common/align.h
@@ -1032,15 +1060,15 @@ wq
 PATCHEND
 # Modify: src/common/dynamic_library.cpp
 ed -s 'src/common/dynamic_library.cpp' <<'PATCHEND'
-161a
+181a
 #elif defined(__SWITCH__)
   return nullptr;
 .
-151a
+171a
 #elif defined(__SWITCH__)
   // no dynamic loading on Switch
 .
-101a
+121a
 #elif defined(__SWITCH__)
   Error::SetStringView(error, "Dynamic loading not supported on Switch");
   return false;
@@ -1777,21 +1805,21 @@ wq
 PATCHEND
 # Modify: src/core/CMakeLists.txt
 ed -s 'src/core/CMakeLists.txt' <<'PATCHEND'
-157s/^/  /
-183s/^/  /
-212,224d
-183a
+162s/^/  /
+188s/^/  /
+218,225d
+188a
   else()
     target_compile_definitions(core PUBLIC "ENABLE_RECOMPILER=1" "ENABLE_MMAP_FASTMEM=1")
   endif()
 .
-182a
+187a
   if(SWITCH)
 .
-157a
+162a
 endif()
 .
-156a
+161a
 if(BUILD_LIBRETRO)
   target_sources(core PRIVATE hotkeys_stub.cpp game_database.cpp game_database.h)
   target_link_libraries(core PRIVATE xxhash rapidyaml cpuinfo::cpuinfo speex_resampler_headers)
@@ -1813,17 +1841,17 @@ if(BUILD_LIBRETRO)
 else()
   target_sources(core PRIVATE hotkeys.cpp)
 .
-155a
+160a
 target_include_directories(core PRIVATE "${PROJECT_SOURCE_DIR}/dep/imgui/include")
 .
-127,128d
-119,120d
-111,112d
-100,101d
-86,87d
-84d
-45,58d
-2,4d
+132,133d
+124,125d
+116,117d
+105,106d
+91,92d
+89d
+51,64d
+8,10d
 wq
 PATCHEND
 # Modify: src/core/achievements.h
@@ -2000,11 +2028,11 @@ PATCHEND
 # Modify: src/core/cdrom.cpp
 ed -s 'src/core/cdrom.cpp' <<'PATCHEND'
 1032s/FullscreenUI::LoadingScreen//
-4360a
+4359a
 
 #endif
 .
-4092a
+4091a
 #ifdef __LIBRETRO__
   return;
 #else
@@ -2148,7 +2176,7 @@ wq
 PATCHEND
 # Modify: src/core/controller.h
 ed -s 'src/core/controller.h' <<'PATCHEND'
-120a
+121a
   using VibrationCallback = void (*)(u32 pad_index, u32 motor, float intensity);
   static inline VibrationCallback s_vibration_callback = nullptr;
 
@@ -2157,30 +2185,30 @@ wq
 PATCHEND
 # Modify: src/core/core.cpp
 ed -s 'src/core/core.cpp' <<'PATCHEND'
-759d
-758a
+766d
+765a
 #if defined(_WIN32) && !defined(__LIBRETRO__)
 .
-706d
-705a
+712d
+711a
 #if defined(_WIN32) && !defined(__LIBRETRO__)
 .
-337a
+338a
 #endif
 .
-336a
+337a
 #ifndef __LIBRETRO__
 .
-249d
-248a
+250d
+249a
 #if !defined(__ANDROID__) || defined(__LIBRETRO__)
 .
-131d
-130a
+132d
+131a
 #if !defined(__ANDROID__) || defined(__LIBRETRO__)
 .
-46d
-45a
+47d
+46a
 #include <shlobj.h>
 .
 wq
@@ -2413,11 +2441,11 @@ wq
 PATCHEND
 # Modify: src/core/dma.cpp
 ed -s 'src/core/dma.cpp' <<'PATCHEND'
-1031a
+999a
 
 #endif
 .
-966a
+934a
 #ifdef __LIBRETRO__
   return;
 #else
@@ -2956,35 +2984,57 @@ inline void OnSystemResumed() {}
 PATCHEND
 # Modify: src/core/gpu.cpp
 ed -s 'src/core/gpu.cpp' <<'PATCHEND'
-2239a
+3910a
 
 #endif
 .
-2187a
+3858a
 #ifdef __LIBRETRO__
   return;
 #else
 
 .
-43a
+1472a
+
+#ifdef __LIBRETRO__
+bool GPU::IsDisplayAreaColorDepth24()
+{
+  return s_locals.GPUSTAT.display_area_color_depth_24;
+}
+
+u16 GPU::GetDisplayAddressStartX()
+{
+  return s_locals.crtc_state.regs.X;
+}
+
+bool GPU::IsDisplayDisabled()
+{
+  return s_locals.GPUSTAT.display_disable;
+}
 #endif
 .
-42a
+49a
+#endif
+.
+48a
 #ifndef __LIBRETRO__
 .
 wq
 PATCHEND
 # Modify: src/core/gpu.h
 ed -s 'src/core/gpu.h' <<'PATCHEND'
-162a
-
+97a
 #ifdef __LIBRETRO__
-  /// Returns true if the display is in 24-bit color depth mode (used for FMVs).
-  ALWAYS_INLINE bool IsDisplayAreaColorDepth24() const { return m_GPUSTAT.display_area_color_depth_24; }
+/// Returns true if the display is in 24-bit color depth mode (used for FMVs).
+bool IsDisplayAreaColorDepth24();
 
-  /// Returns the display address start X coordinate in VRAM (for 24-bit source offset).
-  ALWAYS_INLINE u16 GetDisplayAddressStartX() const { return m_crtc_state.regs.X; }
+/// Returns the display address start X coordinate in VRAM (for 24-bit source offset).
+u16 GetDisplayAddressStartX();
+
+/// Returns true if the display output is disabled (GPUSTAT display-disable bit).
+bool IsDisplayDisabled();
 #endif
+
 .
 wq
 PATCHEND
@@ -3256,16 +3306,15 @@ PATCHEND
 truncate -s -1 'src/core/gpu_hw_shadergen.cpp'
 # Modify: src/core/gpu_hw_texture_cache.cpp
 ed -s 'src/core/gpu_hw_texture_cache.cpp' <<'PATCHEND'
-3513s/fals/tru/
-3465,3468d
-3464a
+3509s/fals/tru/
+3461,3464d
+3460a
     VERBOSE_LOG("Preloading replacement textures: {} of {}", num_textures_loaded, total_textures);                     \
 .
 12d
 5d
 wq
 PATCHEND
-truncate -s -1 'src/core/gpu_hw_texture_cache.cpp'
 # Modify: src/core/gpu_sw.cpp
 ed -s 'src/core/gpu_sw.cpp' <<'PATCHEND'
 399d
@@ -3352,14 +3401,14 @@ void GunCon::SetNormalizedPosition(float norm_x, float norm_y, bool offscreen)
     return;
   }
 
-  const GSVector4i active_rect = g_gpu.GetCRTCVideoActiveRect();
+  const GSVector4i active_rect = GPU::GetCRTCVideoActiveRect();
   const float display_x = std::clamp(norm_x, 0.0f, 1.0f) * static_cast<float>(active_rect.width());
   const float display_y = std::clamp(norm_y, 0.0f, 1.0f) * static_cast<float>(active_rect.height());
   const GSVector2 display_pos(display_x, display_y);
 
   u32 tick, line;
   s32 offset_tick, offset_line;
-  if (!g_gpu.ConvertDisplayCoordinatesToBeamTicksAndLines(display_pos, m_x_scale, &tick, &line) ||
+  if (!GPU::ConvertDisplayCoordinatesToBeamTicksAndLines(display_pos, m_x_scale, &tick, &line) ||
       (offset_tick = static_cast<s32>(tick) + m_tick_offset) < 0 ||
       (offset_line = static_cast<s32>(line) + m_line_offset) < 0)
   {
@@ -3368,7 +3417,7 @@ void GunCon::SetNormalizedPosition(float norm_x, float norm_y, bool offscreen)
     return;
   }
 
-  const double divider = static_cast<double>(g_gpu.GetCRTCFrequency()) / 8000000.0;
+  const double divider = static_cast<double>(GPU::GetCRTCFrequency()) / 8000000.0;
   m_position_x = static_cast<u16>(static_cast<float>(offset_tick) / static_cast<float>(divider));
   m_position_y = static_cast<u16>(offset_line);
 .
@@ -3395,10 +3444,10 @@ wq
 PATCHEND
 # Modify: src/core/host.h
 ed -s 'src/core/host.h' <<'PATCHEND'
-71a
+72a
 #endif
 .
-54a
+55a
 #ifdef __LIBRETRO__
 inline void OpenURL(std::string_view) {}
 inline std::string GetClipboardText() { return {}; }
@@ -3540,13 +3589,13 @@ void Justifier::SetNormalizedPosition(float norm_x, float norm_y, bool offscreen
     return;
   }
 
-  const GSVector4i active_rect = g_gpu.GetCRTCVideoActiveRect();
+  const GSVector4i active_rect = GPU::GetCRTCVideoActiveRect();
   const float display_x = std::clamp(norm_x, 0.0f, 1.0f) * static_cast<float>(active_rect.width());
   const float display_y = std::clamp(norm_y, 0.0f, 1.0f) * static_cast<float>(active_rect.height());
   const GSVector2 display_pos(display_x, display_y);
 
   u32 tick, line;
-  if (!g_gpu.ConvertDisplayCoordinatesToBeamTicksAndLines(display_pos, m_x_scale, &tick, &line))
+  if (!GPU::ConvertDisplayCoordinatesToBeamTicksAndLines(display_pos, m_x_scale, &tick, &line))
   {
     m_position_valid = false;
     UpdateIRQEvent();
@@ -3558,11 +3607,11 @@ void Justifier::SetNormalizedPosition(float norm_x, float norm_y, bool offscreen
   m_irq_tick = static_cast<u16>(static_cast<TickCount>(tick) +
                                 System::ScaleTicksToOverclock(static_cast<TickCount>(m_tick_offset)));
   m_irq_first_line = static_cast<u16>(std::clamp<s32>(static_cast<s32>(line) + m_first_line_offset,
-                                                      static_cast<s32>(g_gpu.GetCRTCActiveStartLine()),
-                                                      static_cast<s32>(g_gpu.GetCRTCActiveEndLine())));
+                                                      static_cast<s32>(GPU::GetCRTCActiveStartLine()),
+                                                      static_cast<s32>(GPU::GetCRTCActiveEndLine())));
   m_irq_last_line = static_cast<u16>(std::clamp<s32>(static_cast<s32>(line) + m_last_line_offset,
-                                                     static_cast<s32>(g_gpu.GetCRTCActiveStartLine()),
-                                                     static_cast<s32>(g_gpu.GetCRTCActiveEndLine())));
+                                                     static_cast<s32>(GPU::GetCRTCActiveStartLine()),
+                                                     static_cast<s32>(GPU::GetCRTCActiveEndLine())));
 .
 206a
   if (m_position_dirty)
@@ -3649,12 +3698,12 @@ wq
 PATCHEND
 # Modify: src/core/performance_counters.cpp
 ed -s 'src/core/performance_counters.cpp' <<'PATCHEND'
-245s/^/  /
-244a
+246s/^/  /
+245a
   if (g_gpu_device)
 .
-224d
-223a
+225d
+224a
   if (g_gpu_device && g_gpu_device->IsGPUTimingEnabled())
 .
 wq
@@ -3699,10 +3748,10 @@ inline bool Load(const std::string&, Error*) { return false; }
 PATCHEND
 # Modify: src/core/settings.cpp
 ed -s 'src/core/settings.cpp' <<'PATCHEND'
-2920a
+2925a
 #endif
 .
-2900a
+2905a
 #ifdef __LIBRETRO__
   // In libretro mode the frontend owns screenshots, save states, shaders, and
   // cheats. Only create dirs the core actually writes to at runtime.
@@ -3710,31 +3759,31 @@ ed -s 'src/core/settings.cpp' <<'PATCHEND'
   EnsureFolderExists(Cache);    // compiled shader/texture cache
 #else
 .
-1665a
+1670a
 #endif
 
 #ifdef __SWITCH__
     case RenderAPI::Deko3D:
       return GPURenderer::HardwareDeko3D;
 .
-1632a
+1637a
 #ifdef __SWITCH__
     case GPURenderer::HardwareDeko3D:
       return RenderAPI::Deko3D;
 #endif
 .
-1581a
+1586a
 #endif
 #ifdef __SWITCH__
   TRANSLATE_DISAMBIG_NOOP("Settings", "Deko3D", "GPURenderer"),
 .
-1565a
+1570a
 #ifdef __SWITCH__
   "Deko3D",
 #endif
 .
-635d
-634a
+637d
+636a
 #if defined(__ANDROID__) && !defined(__LIBRETRO__)
 .
 156d
@@ -3773,11 +3822,11 @@ inline void StopGateSound() {}
 PATCHEND
 # Modify: src/core/spu.cpp
 ed -s 'src/core/spu.cpp' <<'PATCHEND'
-2865a
+2894a
 
 #endif
 .
-2563a
+2591a
 #ifdef __LIBRETRO__
   return;
 #else
@@ -3793,67 +3842,67 @@ wq
 PATCHEND
 # Modify: src/core/system.cpp
 ed -s 'src/core/system.cpp' <<'PATCHEND'
-6075,6092d
-6074a
+6076,6093d
+6075a
 
   if (gte_ar == DisplayAspectRatio::Auto())
     gte_ar = DisplayAspectRatio{16, 9};
   // else: explicit AR passed through → GTE correction for that ratio
 .
-6072,6073d
-6071a
+6073,6074d
+6072a
     GTE::SetAspectRatio(DisplayAspectRatio::Auto());
     return;
 .
-6068,6070d
-6067a
+6069,6071d
+6068a
 
   // No GTE correction without widescreen hack, for PAR 1:1, or for Stretch
   // (Stretch is delegated to the frontend's video settings in the libretro build).
   if (!g_settings.gpu_widescreen_hack || gte_ar == DisplayAspectRatio::PAR1_1() ||
       gte_ar == DisplayAspectRatio::Stretch())
 .
+5628a
+#endif
+.
 5627a
 #endif
 .
-5626a
-#endif
-.
-5607a
+5608a
 #ifndef __LIBRETRO__
 .
-5603a
+5604a
 #endif
 .
-5586a
+5587a
 #ifndef __LIBRETRO__
 .
-5582a
+5583a
 #endif
 .
-5524a
+5525a
 #ifdef __LIBRETRO__
   return false;
 #else
 .
-5519a
+5520a
 #endif
 .
-5485a
+5486a
 #ifdef __LIBRETRO__
   return false;
 #else
 .
-5471a
+5472a
 #ifndef __LIBRETRO__
 .
-5429a
+5430a
 #endif
 .
-5352a
+5353a
 #ifndef __LIBRETRO__
 .
-3311a
+3310a
   return true;
 }
 
@@ -3880,11 +3929,11 @@ bool System::LoadStateDataFromBuffer(std::span<const u8> data, u32 version, Erro
   ResetThrottler();
 
   if (update_display)
-    g_gpu.UpdateDisplay(true);
+    GPU::UpdateDisplay(true);
 
 .
-2134d
-2133a
+2133d
+2132a
     ((is_duplicate_frame || (s_state.throttler_enabled && !s_state.optimal_frame_pacing &&
                              current_time > s_state.next_frame_time &&
 .
@@ -3965,11 +4014,11 @@ wq
 PATCHEND
 # Modify: src/core/timers.cpp
 ed -s 'src/core/timers.cpp' <<'PATCHEND'
-586a
+595a
 
 #endif
 .
-528a
+537a
 #ifdef __LIBRETRO__
   return;
 #else
@@ -13362,10 +13411,10 @@ static float GetDisplayAspectRatioFloat(u32 content_w, u32 content_h)
     return 16.0f / 9.0f;
 
   // FMV zoom: content already cropped to 16:9 by GetFMVCrop.
-  if (LibretroHost::s_fmv_zoom_16_9 && g_gpu.IsDisplayAreaColorDepth24())
+  if (LibretroHost::s_fmv_zoom_16_9 && GPU::IsDisplayAreaColorDepth24())
     return 16.0f / 9.0f;
 
-  const float par = g_gpu.ComputePixelAspectRatio();
+  const float par = GPU::ComputePixelAspectRatio();
   return static_cast<float>(content_w) / static_cast<float>(content_h) * par;
 }
 
@@ -13373,7 +13422,7 @@ static float GetDisplayAspectRatioFloat(u32 content_w, u32 content_h)
 // Assumes 16:9 content letterboxed in a 4:3 frame.
 static std::pair<u32, u32> GetFMVCrop(u32 width, u32 height)
 {
-  if (!LibretroHost::s_fmv_zoom_16_9 || !g_gpu.IsDisplayAreaColorDepth24())
+  if (!LibretroHost::s_fmv_zoom_16_9 || !GPU::IsDisplayAreaColorDepth24())
     return {0, 0};
 
   // Content height if 16:9: width * 9 / 16
@@ -15125,7 +15174,7 @@ void LibretroHost::PushVideoFrame()
   if (!s_video_refresh_callback)
     return;
 
-  if (g_gpu.IsDisplayDisabled())
+  if (GPU::IsDisplayDisabled())
   {
     s_video_framebuffer.resize(320 * 240);
     std::fill(s_video_framebuffer.begin(), s_video_framebuffer.end(), 0xFF000000u);
@@ -15133,7 +15182,7 @@ void LibretroHost::PushVideoFrame()
     return;
   }
 
-  const GSVector2i video_size = g_gpu.GetCRTCVideoSize();
+  const GSVector2i video_size = GPU::GetCRTCVideoSize();
   u32 frame_w = static_cast<u32>(video_size.x);
   u32 frame_h = static_cast<u32>(video_size.y);
   if (frame_w == 0 || frame_h == 0)
@@ -15144,11 +15193,11 @@ void LibretroHost::PushVideoFrame()
   frame_w = std::min(frame_w, static_cast<u32>(VRAM_WIDTH));
   frame_h = std::min(frame_h, static_cast<u32>(VRAM_HEIGHT));
 
-  const GSVector4i active_rect = g_gpu.GetCRTCVideoActiveRect();
+  const GSVector4i active_rect = GPU::GetCRTCVideoActiveRect();
   const u32 origin_x = static_cast<u32>(active_rect.x);
   const u32 origin_y = static_cast<u32>(active_rect.y);
 
-  const GSVector4i src_rect = g_gpu.GetCRTCVRAMSourceRect();
+  const GSVector4i src_rect = GPU::GetCRTCVRAMSourceRect();
   const u32 vram_left = static_cast<u32>(src_rect.x);
   const u32 vram_top = static_cast<u32>(src_rect.y);
   u32 vram_width = static_cast<u32>(src_rect.z) - vram_left;
@@ -15174,11 +15223,11 @@ void LibretroHost::PushVideoFrame()
   const u32 y_end = (y_end_s > 0) ? std::min(vram_height, static_cast<u32>(y_end_s)) : 0;
   const u32 x_end = (origin_x < frame_w) ? std::min(vram_width, frame_w - origin_x) : 0;
 
-  const bool is_24bit = g_gpu.IsDisplayAreaColorDepth24();
+  const bool is_24bit = GPU::IsDisplayAreaColorDepth24();
 
   if (is_24bit)
   {
-    const u32 src_x_base = g_gpu.GetDisplayAddressStartX();
+    const u32 src_x_base = GPU::GetDisplayAddressStartX();
     const u32 skip_x = vram_left - src_x_base;
 
     for (u32 y = y_start; y < y_end; y++)
@@ -15310,7 +15359,7 @@ void LibretroHost::PushDeko3DHWVideoFrame()
     return;
   }
 
-  if (g_gpu.IsDisplayDisabled() || !VideoPresenter::HasDisplayTexture())
+  if (GPU::IsDisplayDisabled() || !VideoPresenter::HasDisplayTexture())
   {
     // Pass RETRO_HW_FRAME_BUFFER_VALID (not nullptr) so RA's dk3d_frame
     // re-presents the previous set_image instead of clearing the swapchain
@@ -15386,7 +15435,7 @@ void LibretroHost::PushDeko3DVideoFrame()
   {
     static u32 skip_count = 0;
     static u32 last_log = 0;
-    const bool disp_off = g_gpu.IsDisplayDisabled();
+    const bool disp_off = GPU::IsDisplayDisabled();
     const bool no_tex = !VideoPresenter::HasDisplayTexture();
     if (disp_off || no_tex)
     {
@@ -15680,7 +15729,7 @@ void RETRO_CALLCONV LibretroHost::HWContextReset()
       return;
     }
 
-    g_gpu.UpdateDisplay(false);
+    GPU::UpdateDisplay(false);
     LibretroLog(RETRO_LOG_INFO, "[GooseStation] GPU backend recreated after GL context loss\n");
   }
 }
@@ -15982,7 +16031,7 @@ void RETRO_CALLCONV LibretroHost::VulkanHWContextReset()
       return;
     }
 
-    g_gpu.UpdateDisplay(false);
+    GPU::UpdateDisplay(false);
     LibretroLog(RETRO_LOG_INFO, "[GooseStation] GPU backend recreated after context loss\n");
   }
 }
@@ -18156,9 +18205,9 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info)
   // handing a high-res atlas for a native-res base. Reporting upscaled dims
   // here makes RA stats scale_x = vp.width / base_width invert to <1 and
   // truncate to 0.
-  if (System::IsValid() && !g_gpu.IsDisplayDisabled())
+  if (System::IsValid() && !GPU::IsDisplayDisabled())
   {
-    const GSVector2i video_size = g_gpu.GetCRTCVideoSize();
+    const GSVector2i video_size = GPU::GetCRTCVideoSize();
     info->geometry.base_width = static_cast<unsigned>(video_size.x);
     info->geometry.base_height = static_cast<unsigned>(video_size.y);
     if (info->geometry.base_width == 0 || info->geometry.base_height == 0)
@@ -18259,7 +18308,7 @@ RETRO_API void retro_run(void)
   }
 
   System::Execute();
-  const bool display_disabled_after = g_gpu.IsDisplayDisabled();
+  const bool display_disabled_after = GPU::IsDisplayDisabled();
 
   {
     // Use the stable CRT raster dimensions (video_size) rather than the
@@ -18269,7 +18318,7 @@ RETRO_API void retro_run(void)
     u32 content_w, content_h;
     if (!display_disabled_after)
     {
-      const GSVector2i video_size = g_gpu.GetCRTCVideoSize();
+      const GSVector2i video_size = GPU::GetCRTCVideoSize();
       content_w = static_cast<u32>(video_size.x);
       content_h = static_cast<u32>(video_size.y);
       if (content_w == 0 || content_h == 0)
@@ -18631,9 +18680,10 @@ overlay0_descs = 0
 PATCHEND
 # Modify: src/util/CMakeLists.txt
 ed -s 'src/util/CMakeLists.txt' <<'PATCHEND'
-194,195s/^/  /
-277,341d
-271a
+195,196s/^/  /
+215s/^/  /
+239,277d
+233a
 elseif(SWITCH)
   target_sources(util PRIVATE
     deko3d_device.cpp
@@ -18659,12 +18709,57 @@ elseif(SWITCH)
     target_include_directories(util PRIVATE ${SWITCH_UAM_PREFIX}/include)
   endif()
 .
-198,216d
-197a
+216,217d
+215a
+elseif(APPLE)
+.
+206,214d
+205a
+  target_link_libraries(util PRIVATE d3d12ma)
+  target_link_libraries(util PRIVATE Cfgmgr32.lib Dwmapi.lib winhttp.lib)
+
+  if(CMAKE_BUILD_TYPE MATCHES "Debug|Devel")
+    target_link_libraries(util PRIVATE WinPixEventRuntime::WinPixEventRuntime)
+.
+201,204d
+200a
+    d3d_common.cpp
+    d3d_common.h
+    d3d11_device.cpp
+    d3d11_device.h
+    d3d11_pipeline.cpp
+    d3d11_pipeline.h
+    d3d11_stream_buffer.cpp
+    d3d11_stream_buffer.h
+    d3d11_texture.cpp
+    d3d11_texture.h
+    d3d12_builders.cpp
+    d3d12_builders.h
+    d3d12_descriptor_heap_manager.cpp
+    d3d12_descriptor_heap_manager.h
+    d3d12_device.cpp
+    d3d12_device.h
+    d3d12_pipeline.cpp
+    d3d12_pipeline.h
+    d3d12_stream_buffer.cpp
+    d3d12_stream_buffer.h
+    d3d12_texture.cpp
+    d3d12_texture.h
+    dinput_source.cpp
+    dinput_source.h
+    http_downloader_winhttp.cpp
+    win32_raw_input_source.cpp
+    win32_raw_input_source.h
+    xaudio2_audio_stream.cpp
+    xinput_source.cpp
+    xinput_source.h
+.
+199d
+198a
 if(WIN32 AND NOT BUILD_LIBRETRO)
 .
-196d
-195a
+197d
+196a
 elseif(TARGET spirv-cross-c)
   get_target_property(SPIRV_CROSS_INCLUDE_DIR spirv-cross-c INTERFACE_INCLUDE_DIRECTORIES)
 else()
@@ -18678,30 +18773,30 @@ if(SPIRV_CROSS_INCLUDE_DIR)
 endif()
 include("${CMAKE_SOURCE_DIR}/CMakeModules/GooseLibretroLinking.cmake")
 .
-194a
+195a
 else()
   find_path(SHADERC_INCLUDE_DIR shaderc/shaderc.h)
 endif()
 if(TARGET spirv-cross-c-shared)
 .
-193d
-192a
+194d
+193a
 # shaderc/spirv-cross headers are needed unconditionally (dyn_shaderc.h, dyn_spirv_cross.h).
 # For libretro builds, link statically when available (dlopen is impractical on Android/macOS).
 if(TARGET Shaderc::shaderc_shared)
 .
-138,161d
-137a
+139,162d
+138a
   elseif(APPLE)
 .
-125,132d
-124a
+133d
+132a
   # On Switch libretro, RA owns the GL context — don't link EGL or Mesa.
   # Bundled Mesa libraries conflict with RA's own GL init (GPU fault on start).
   if((LINUX OR BSD OR ANDROID) OR (SWITCH AND NOT BUILD_LIBRETRO))
 .
-104,105d
-103a
+112,113d
+111a
 target_precompile_headers(util PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/pch.h")
 target_include_directories(util PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
 target_include_directories(util PRIVATE "${PROJECT_SOURCE_DIR}/dep/imgui/include")
@@ -18710,24 +18805,25 @@ target_link_libraries(util PRIVATE libchdr lzma PNG::PNG xxhash libjpeg-turbo::j
 if(NOT BUILD_LIBRETRO)
   target_link_libraries(util PRIVATE plutosvg::plutosvg SoundTouch::SoundTouchDLL)
 .
-90,101d
-89a
+96,109d
+95a
 target_sources(util PRIVATE compress_helpers.cpp compress_helpers.h core_audio_stream.cpp core_audio_stream.h ini_settings_interface.cpp ini_settings_interface.h input_manager.cpp input_manager.h shadergen.cpp shadergen.h)
 if(NOT BUILD_LIBRETRO)
   target_sources(util PRIVATE imgui_gsvector.h animated_image.cpp animated_image.h input_source.cpp input_source.h media_capture.cpp)
 .
-84,85d
-81a
+90,91d
+87a
   wav_reader_writer.cpp
   wav_reader_writer.h
 .
-74,77d
-60,71d
-54,57d
-43,51d
-37,40d
-19,22d
-2,3d
+80,83d
+66,77d
+60,63d
+49,57d
+43,46d
+25,28d
+8,9d
+1,6d
 wq
 PATCHEND
 # Modify: src/util/audio_stream.cpp
@@ -18787,10 +18883,10 @@ wq
 PATCHEND
 # Modify: src/util/core_audio_stream.cpp
 ed -s 'src/util/core_audio_stream.cpp' <<'PATCHEND'
-928a
+931a
 #endif // !__LIBRETRO__
 .
-613a
+614a
 #ifdef __LIBRETRO__
 void CoreAudioStream::StretchAllocate() {}
 void CoreAudioStream::StretchDestroy() {}
@@ -18803,16 +18899,16 @@ void CoreAudioStream::UpdateStretchTempo() {}
 float CoreAudioStream::AddAndGetAverageTempo(float) { return 1.0f; }
 #else
 .
-486a
+487a
 #endif
 .
-482a
+483a
 #ifndef __LIBRETRO__
 .
-475a
+476a
 #endif
 .
-469a
+470a
 #ifndef __LIBRETRO__
 .
 258a
@@ -22126,8 +22222,8 @@ private:
 PATCHEND
 # Modify: src/util/dyn_shaderc.h
 ed -s 'src/util/dyn_shaderc.h' <<'PATCHEND'
-32a
-DYN_SHADERC_OPTIONAL_FUNCTIONS(ADD_FUNC)
+30a
+  DYN_SHADERC_OPTIONAL_FUNCTIONS(ADD_FUNC)
 .
 24d
 23a
@@ -22149,47 +22245,38 @@ wq
 PATCHEND
 # Modify: src/util/gpu_device.cpp
 ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
-1702d
-1701a
+1675d
+1674a
 #if defined(_WIN32) && !defined(__LIBRETRO__)
 .
-1585a
-#endif
-.
-1583a
-#ifndef __LIBRETRO__
-.
-1527a
+1497a
 
-  if (!dyn_libs::shaderc_optimize_spv)
+  // System shaderc doesn't provide DuckStation's custom optimizer.
+  if (!g_dyn_shaderc.shaderc_optimize_spv)
   {
     Error::SetStringView(error, "shaderc_optimize_spv not available (system shaderc)");
     return ret;
   }
 .
-1498a
-#undef DYN_SHADERC_OPTIONAL_FUNCTIONS
-.
-1492a
+1467a
 #endif
 .
-1482a
-#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32) || defined(GOOSE_LIBRETRO_STATIC_DEPS))
-  // Nothing to do — statically linked.
-#else
+1442d
+1441a
+    const std::string libpath = DynamicLibrary::GetVersionedFilename("spirv-cross-c-shared", SPVC_C_API_VERSION_MAJOR);
 .
-1478a
-#endif
+1440d
+1439a
+    const std::string libpath = DynamicLibrary::GetVersionedFilename("spirv-cross-c-shared");
 .
-1449a
-
+1431a
 #if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32) || defined(GOOSE_LIBRETRO_STATIC_DEPS))
   // Android/Apple/Windows libretro builds link spirv-cross statically — assign function pointers directly.
   static bool s_spirv_cross_initialized = false;
   if (s_spirv_cross_initialized)
     return true;
 
-#define ASSIGN_FUNC(F) F = &::F;
+#define ASSIGN_FUNC(F) g_dyn_spirv_cross.F = &::F;
   SPIRV_CROSS_FUNCTIONS(ASSIGN_FUNC)
   SPIRV_CROSS_HLSL_FUNCTIONS(ASSIGN_FUNC)
   SPIRV_CROSS_MSL_FUNCTIONS(ASSIGN_FUNC)
@@ -22199,54 +22286,39 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
   return true;
 #else
 .
-1444a
-#endif
-.
-1441a
-  DYN_SHADERC_OPTIONAL_FUNCTIONS(UNLOAD_FUNC)
-.
 1427a
-#if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32) || defined(GOOSE_LIBRETRO_STATIC_DEPS))
-  if (g_shaderc_compiler)
-  {
-    ::shaderc_compiler_release(g_shaderc_compiler);
-    g_shaderc_compiler = nullptr;
-  }
-#else
-.
-1423a
 #endif
 .
 1414a
-  // Optional functions — DuckStation extensions, not in system shaderc.
-  // Load silently; fallbacks are used when not found.
-#define LOAD_OPTIONAL_FUNC(F) s_shaderc_library.GetSymbol(#F, &F);
-  DYN_SHADERC_OPTIONAL_FUNCTIONS(LOAD_OPTIONAL_FUNC)
-#undef LOAD_OPTIONAL_FUNC
-
-  // Provide fallbacks for DuckStation-custom functions not in system shaderc.
-  if (!shaderc_compilation_status_to_string)
-    shaderc_compilation_status_to_string = shaderc_compilation_status_to_string_fallback;
+    // DuckStation's custom shaderc extensions are absent from system shaderc; load if present.
+    static const DynamicLibrary::OptionalSymbolTable shaderc_optional_symbols[] = {
+#define SHADERC_OPT_SYMBOL(F) {#F, (void**)&g_dyn_shaderc.F, false},
+      DYN_SHADERC_OPTIONAL_FUNCTIONS(SHADERC_OPT_SYMBOL)
+#undef SHADERC_OPT_SYMBOL
+    };
+    lib.ResolveSymbols(shaderc_optional_symbols, std::size(shaderc_optional_symbols));
+    if (!g_dyn_shaderc.shaderc_compilation_status_to_string)
+      g_dyn_shaderc.shaderc_compilation_status_to_string = shaderc_compilation_status_to_string_fallback;
 
 .
-1393a
-
+1399d
+1398a
+    // Load the system shaderc, not a bundled copy.
+    if (!lib.Open(DynamicLibrary::GetVersionedFilename("shaderc_shared").c_str(), error))
+.
+1395a
 #if defined(__LIBRETRO__) && (defined(__ANDROID__) || defined(__APPLE__) || defined(_WIN32) || defined(GOOSE_LIBRETRO_STATIC_DEPS))
   // Android/Apple/Windows libretro builds link shaderc statically — assign function pointers directly.
-  if (g_shaderc_compiler)
-    return true;
-
-#define ASSIGN_FUNC(F) F = &::F;
+#define ASSIGN_FUNC(F) g_dyn_shaderc.F = &::F;
   DYN_SHADERC_FUNCTIONS(ASSIGN_FUNC)
 #undef ASSIGN_FUNC
 
-  // Optional DuckStation-custom functions don't exist in standard shaderc.
-  // Use fallbacks instead.
-  shaderc_compilation_status_to_string = shaderc_compilation_status_to_string_fallback;
-  shaderc_optimize_spv = nullptr;
+  // Standard shaderc lacks DuckStation's custom extensions; use a fallback / disable.
+  g_dyn_shaderc.shaderc_compilation_status_to_string = shaderc_compilation_status_to_string_fallback;
+  g_dyn_shaderc.shaderc_optimize_spv = nullptr;
 
-  g_shaderc_compiler = ::shaderc_compiler_initialize();
-  if (!g_shaderc_compiler)
+  compiler = g_dyn_shaderc.shaderc_compiler_initialize();
+  if (!compiler)
   {
     Error::SetStringView(error, "shaderc_compiler_initialize() failed");
     return false;
@@ -22255,9 +22327,12 @@ ed -s 'src/util/gpu_device.cpp' <<'PATCHEND'
   return true;
 #else
 .
-1390a
-// Fallback for DuckStation's custom shaderc_compilation_status_to_string.
-// System shaderc doesn't export this function.
+1387a
+  }
+}
+
+// Fallback for DuckStation's custom shaderc_compilation_status_to_string, which is
+// absent from standard/system shaderc builds used by the libretro core.
 static const char* shaderc_compilation_status_to_string_fallback(shaderc_compilation_status status)
 {
   switch (status)
@@ -22272,30 +22347,24 @@ static const char* shaderc_compilation_status_to_string_fallback(shaderc_compila
     case shaderc_compilation_status_transformation_error: return "transformation error";
     case shaderc_compilation_status_configuration_error: return "configuration error";
     default: return "unknown error";
-  }
-}
-
 .
-1383a
-DYN_SHADERC_OPTIONAL_FUNCTIONS(ADD_FUNC)
-.
-1363a
-#endif
-
+1385a
 #ifdef __SWITCH__
     case RenderAPI::Deko3D:
       return std::make_unique<Deko3DDevice>();
+#endif
+
 .
-1353d
-1352a
+1373d
+1372a
 #if defined(_WIN32) && !defined(__LIBRETRO__)
 .
-461,462d
-460a
+480,481d
+479a
       WARNING_LOG("Non-standard GPU device flags: {}", message);
 .
-405d
-404a
+424d
+423a
 #if defined(_WIN32) && !defined(__LIBRETRO__)
 .
 46a
@@ -22330,7 +22399,7 @@ wq
 PATCHEND
 # Modify: src/util/http_cache.h
 ed -s 'src/util/http_cache.h' <<'PATCHEND'
-104a
+83a
 
 #endif // !__LIBRETRO__
 .
@@ -22357,7 +22426,7 @@ inline void PollRequests() {}
 PATCHEND
 # Modify: src/util/image.cpp
 ed -s 'src/util/image.cpp' <<'PATCHEND'
-426a
+467a
 #endif
 .
 390a
@@ -23400,7 +23469,7 @@ wq
 PATCHEND
 # Modify: src/util/vulkan_loader.cpp
 ed -s 'src/util/vulkan_loader.cpp' <<'PATCHEND'
-528a
+498a
 }
 
 bool VulkanLoader::AdoptExternalInstance(VkInstance instance, PFN_vkGetInstanceProcAddr get_instance_proc_addr,
@@ -23417,7 +23486,7 @@ bool VulkanLoader::AdoptExternalInstance(VkInstance instance, PFN_vkGetInstanceP
 
   if (!LoadInstanceFunctions(instance, error))
   {
-    ResetInstanceFunctions();
+    DynamicLibrary::ClearSymbols(s_vulkan_instance_entry_points);
     return false;
   }
 
@@ -23431,20 +23500,20 @@ bool VulkanLoader::AdoptExternalInstance(VkInstance instance, PFN_vkGetInstanceP
   INFO_LOG("Adopted external Vulkan instance {:p}", static_cast<void*>(instance));
   return true;
 .
-500a
+471a
   s_locals.is_external_instance = false;
 .
-497a
+467a
   }
 .
-496a
+466a
   {
 .
-495a
+465a
   }
 .
-494d
-493a
+464d
+463a
   if (s_locals.is_external_instance)
   {
     // External instance is owned by the frontend (e.g., libretro) — do not destroy.
@@ -23453,7 +23522,7 @@ bool VulkanLoader::AdoptExternalInstance(VkInstance instance, PFN_vkGetInstanceP
   else if (vkDestroyInstance)
   {
 .
-66a
+64a
   bool is_external_instance = false;
 .
 wq
