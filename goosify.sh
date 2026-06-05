@@ -18140,7 +18140,7 @@ RETRO_API void retro_get_system_info(struct retro_system_info* info)
 {
   std::memset(info, 0, sizeof(*info));
   info->library_name = "GooseStation";
-  info->library_version = "0.5 (" __DATE__ " " __TIME__ ")";
+  info->library_version = "0.5.1 (" __DATE__ " " __TIME__ ")";
   info->valid_extensions = "cue|bin|img|mdf|chd|pbp|iso|m3u|exe|psf|psxexe";
   info->need_fullpath = true;
   info->block_extract = true;
@@ -18653,6 +18653,11 @@ elseif(SWITCH)
     PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE
   )
   target_link_libraries(util PRIVATE deko3d nx uam)
+  # The patched libuam lives in a self-contained prefix outside devkitPro, so its
+  # uam.h is not on the toolchain include path; point the deko3d sources at it.
+  if(SWITCH_UAM_PREFIX)
+    target_include_directories(util PRIVATE ${SWITCH_UAM_PREFIX}/include)
+  endif()
 .
 198,216d
 197a
