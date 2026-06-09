@@ -298,7 +298,7 @@ cat > 'cmake/FindShaderc.cmake' <<'PATCHEND'
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PC_shaderc REQUIRED IMPORTED_TARGET shaderc)
 
-find_library(shaderc_LIBRARY NAMES shaderc_shared
+find_library(shaderc_LIBRARY NAMES shaderc_shared shaderc
              HINTS ${PC_shaderc_LIBRARY_DIRS})
 
 add_library(Shaderc::shaderc_shared UNKNOWN IMPORTED)
