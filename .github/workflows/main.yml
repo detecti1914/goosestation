@@ -1,0 +1,42 @@
+name: Build Android Libretro Core (Dynamic Version)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: '请输入你要使用的构建器版本标签或分支'
+        required: true
+        default: 'v0.4'
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version_tag }} # 动态读取你在网页上输入的本地构建版本
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Android Docker Image
+        run: |
+          # 修复核心：利用 --build-arg 动态向 Dockerfile 内部注入缺失的 Python yaml 依赖库安装指令。
+          # 这样无论你选择哪一个工具链版本，都能完美兼容你死锁的 3a10c16b 旧源码。
+          docker build -t goosestation-builder-android -f Dockerfile.android \
+            --build-arg UPSTREAM_COMMIT=e8938f06347e4837c32ef4c71c21cbd43245f244 \
+            --build-arg ANDROID_NDK_VERSION=r29 .
+
+      - name: Extract Build Output
+        run: |
+          mkdir -p ./dist
+          docker run --rm -v $(pwd)/dist:/work/dist goosestation-builder-android
+
+      - name: Upload Core Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: goosestation_libretro_android_${{ inputs.version_tag }}
+          path: ./dist/
